@@ -1,0 +1,11 @@
+{
+  "theme": "dark",
+  "display_mode": "grid",
+  "screen_rotation": "normal",
+  "mic_enabled": true,
+  "mic_interval_seconds": 8,
+  "moodes": [
+    {"id": "moode_1", "name": "Living Room", "host": "192.168.1.222", "port": 6600},
+    {"id": "moode_2", "name": "Study", "host": "192.168.1.223", "port": 6600}
+  ]
+}

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Now Playing Monitor</title>
+    <style>
+        body.dark { background: #0f111a; color: #fff; }
+        body.light { background: #f3f4f6; color: #111827; }
+        body.retro { background: #1c1917; color: #f59e0b; }
+        body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; transition: all 0.3s; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .settings-btn { background: #3b82f6; color: white; text-decoration: none; padding: 8px 16px; border-radius: 8px; font-weight: bold; }
+        .grid { display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; }
+        .focus { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+        .card { background: rgba(255,255,255,0.05); border-radius: 16px; padding: 20px; width: 280px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.3); position: relative; }
+        .card.active { border: 2px solid #10b981; }
+        img { width: 100%; height: 250px; border-radius: 12px; object-fit: cover; margin-top: 10px; }
+        .badge { position: absolute; top: 12px; right: 12px; font-size: 0.7rem; padding: 3px 8px; border-radius: 8px; background: #555; color: #fff; }
+        .badge.playing { background: #10b981; }
+        .title { font-size: 1.1rem; font-weight: bold; margin: 10px 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .artist { font-size: 0.9rem; opacity: 0.7; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    </style>
+</head>
+<body class="{{ config.theme }}">
+    <header>
+        <h1>Now Playing</h1>
+        <a href="/settings" class="settings-btn">⚙️ Settings</a>
+    </header>
+    <div id="container" class="{{ config.display_mode }}"></div>
+    <script>
+        async function update() {
+            try {
+                const res = await fetch('/api/dashboard');
+                const data = await res.json();
+                document.body.className = data.config.theme;
+                const container = document.getElementById('container');
+                container.className = data.config.display_mode;
+                container.innerHTML = '';
+
+                data.moodes.forEach(m => {
+                    container.innerHTML += `
+                        <div class="card ${m.playing ? 'active' : ''}">
+                            <span class="badge ${m.playing ? 'playing' : ''}">${m.playing ? 'Playing' : 'Paused'}</span>
+                            <div style="font-size: 0.8rem; opacity:0.6">${m.name}</div>
+                            <img src="${m.coverart}">
+                            <div class="title">${m.title}</div>
+                            <div class="artist">${m.artist}</div>
+                        </div>
+                    `;
+                });
+
+                if (data.config.mic_enabled) {
+                    container.innerHTML += `
+                        <div class="card active" style="border-color: #818cf8;">
+                            <span class="badge playing">Mic Active</span>
+                            <div style="font-size: 0.8rem; color:#818cf8">${data.ambient.name}</div>
+                            <img src="${data.ambient.coverart}">
+                            <div class="title">${data.ambient.title}</div>
+                            <div class="artist">${data.ambient.artist}</div>
+                        </div>
+                    `;
+                }
+            } catch(e) { console.error(e); }
+        }
+        setInterval(update, 3000);
+        update();
+    </script>
+</body>
+</html>

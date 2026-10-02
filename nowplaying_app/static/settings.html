@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Server Settings</title>
+    <style>
+        body { background: #111827; color: #fff; font-family: system-ui, sans-serif; padding: 30px; max-width: 600px; margin: 0 auto; }
+        .card { background: #1f2937; padding: 20px; border-radius: 12px; margin-bottom: 20px; }
+        label { display: block; margin: 10px 0 5px; font-weight: bold; }
+        input[type="text"], input[type="number"], select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #374151; background: #111827; color: #fff; box-sizing: border-box; }
+        .row { display: flex; gap: 10px; margin-bottom: 10px; }
+        .btn { background: #10b981; color: white; border: none; padding: 12px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; }
+        .btn-add { background: #3b82f6; margin-top: 10px; width: auto; }
+        .btn-danger { background: #ef4444; width: 48%; }
+        .btn-warning { background: #f59e0b; width: 48%; }
+        .power-controls { display: flex; justify-content: space-between; gap: 10px; margin-top: 10px; }
+        a { color: #9ca3af; text-decoration: none; display: inline-block; margin-bottom: 15px; }
+        .checkbox-label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+        .checkbox-label input { width: 18px; height: 18px; }
+    </style>
+</head>
+<body>
+    <a href="/">← Back to Display</a>
+    <h1>System & App Settings</h1>
+    <form action="/settings/save" method="post">
+        <div class="card">
+            <h3>System & Screen Options</h3>
+            <label class="checkbox-label">
+                <input type="checkbox" name="local_kiosk" {% if system.kiosk_active %}checked{% endif %}>
+                Display locally on HDMI / Ribbon Display (Kiosk Mode)
+            </label>
+            <label style="margin-top: 15px;">Screen Orientation / Rotation</label>
+            <select name="screen_rotation">
+                <option value="normal" {% if config.screen_rotation == 'normal' %}selected{% endif %}>Normal (0°)</option>
+                <option value="right" {% if config.screen_rotation == 'right' %}selected{% endif %}>Rotate 90° Clockwise (Portrait)</option>
+                <option value="inverted" {% if config.screen_rotation == 'inverted' %}selected{% endif %}>Rotate 180° (Upside Down)</option>
+                <option value="left" {% if config.screen_rotation == 'left' %}selected{% endif %}>Rotate 270° Counter-Clockwise</option>
+            </select>
+            <hr style="border: 0; border-top: 1px solid #374151; margin: 20px 0;">
+            <label class="checkbox-label">
+                <input type="checkbox" name="ssh_enabled" {% if system.ssh_active %}checked{% endif %}>
+                Enable Remote SSH Access
+            </label>
+        </div>
+
+        <div class="card">
+            <h3>Visual Customization</h3>
+            <label>Theme</label>
+            <select name="theme">
+                <option value="dark" {% if config.theme == 'dark' %}selected{% endif %}>Dark</option>
+                <option value="light" {% if config.theme == 'light' %}selected{% endif %}>Light</option>
+                <option value="retro" {% if config.theme == 'retro' %}selected{% endif %}>Retro Amber</option>
+            </select>
+            <label>Display Mode</label>
+            <select name="display_mode">
+                <option value="grid" {% if config.display_mode == 'grid' %}selected{% endif %}>Grid View (Side-by-Side)</option>
+                <option value="focus" {% if config.display_mode == 'focus' %}selected{% endif %}>Focus Mode (Stacked)</option>
+            </select>
+        </div>
+
+        <div class="card">
+            <h3>Ambient Listening (CD Detection)</h3>
+            <label class="checkbox-label">
+                <input type="checkbox" name="mic_enabled" {% if config.mic_enabled %}checked{% endif %}>
+                Enable Microphone Listener
+            </label>
+            <label>Microphone Sampling Duration (seconds)</label>
+            <input type="number" name="mic_interval_seconds" value="{{ config.mic_interval_seconds }}">
+        </div>
+
+        <div class="card">
+            <h3>moOde Players</h3>
+            <div id="moode-list">
+                {% for m in config.moodes %}
+                <div class="row">
+                    <input type="text" name="moode_name" value="{{ m.name }}" placeholder="Name">
+                    <input type="text" name="moode_host" value="{{ m.host }}" placeholder="IP Address">
+                    <input type="number" name="moode_port" value="{{ m.port }}" style="width: 100px;">
+                </div>
+                {% endfor %}
+            </div>
+            <button type="button" class="btn btn-add" onclick="addMoodeRow()">+ Add moOde Player</button>
+        </div>
+
+        <button type="submit" class="btn">Save & Apply Settings</button>
+    </form>
+
+    <div class="card" style="margin-top: 30px; border: 1px solid #dc2626;">
+        <h3 style="color: #ef4444; margin-top:0;">Power Controls</h3>
+        <p style="font-size: 0.85rem; color: #9ca3af;">Safely reboot or shut down the Raspberry Pi system.</p>
+        <div class="power-controls">
+            <button class="btn btn-warning" onclick="systemAction('reboot')">Reboot System</button>
+            <button class="btn btn-danger" onclick="systemAction('shutdown')">Shutdown System</button>
+        </div>
+    </div>
+
+    <script>
+        function addMoodeRow() {
+            const div = document.createElement('div');
+            div.className = 'row';
+            div.innerHTML = `
+                <input type="text" name="moode_name" placeholder="Name">
+                <input type="text" name="moode_host" placeholder="IP Address">
+                <input type="number" name="moode_port" value="6600" style="width: 100px;">
+            `;
+            document.getElementById('moode-list').appendChild(div);
+        }
+
+        async function systemAction(action) {
+            if (!confirm(`Are you sure you want to ${action} the Raspberry Pi?`)) return;
+            try {
+                await fetch(`/system/${action}`, { method: 'POST' });
+                alert(`System action triggered: ${action}.`);
+            } catch(e) { alert(`Action failed: ${e}`); }
+        }
+    </script>
+</body>
+</html>
