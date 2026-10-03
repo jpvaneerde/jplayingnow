@@ -290,32 +290,41 @@ def find_station_logo(host, station):
     _logo_cache[key] = (found, time.time() + (3600 if found else 120))
     return found
 
-def fetch_moode_art(host, station=""):
+def fetch_moode_art(host, station="", is_radio=False):
     """Ask moOde itself for the current cover; for radio, fall back to the station logo.
 
     Returns (path_or_url, note). The note says where the art came from or why none was found;
     it is exposed in /api/dashboard as "art_debug" to make problems easy to diagnose.
     """
     url = ""
+    album = ""
     notes = []
     # engine-mpd.php?cmd=status is confirmed to return coverurl on this setup
     for endpoint in ("engine-mpd.php?cmd=status", "command/?cmd=get_currentsong"):
         try:
             data = requests.get(f"http://{host}/{endpoint}", timeout=6).json()
             url = (data.get("coverurl") or "").strip()
-            notes.append(f"{endpoint}: coverurl={url!r}")
+            album = str(data.get("album") or "")
+            notes.append(
+                f"{endpoint} @ {host}: coverurl={url!r} album={album!r} "
+                f"state={data.get('state')!r} file={data.get('file')!r}"
+            )
             break
         except Exception as e:
-            notes.append(f"{endpoint} failed: {type(e).__name__}: {e}")
+            notes.append(f"{endpoint} @ {host} failed: {type(e).__name__}: {e}")
     note = " | ".join(notes)
     _moode_debug(host, note)
     # moOde placeholders are all named default-*.jpg/png/svg (default-radio-cover.jpg, ...)
     if url and not unquote(url).rsplit("/", 1)[-1].lower().startswith("default"):
         return _moode_rel(url), note
-    if station:
-        logo = find_station_logo(host, station)
-        return logo, note + f" | station logo {station!r}: {'found' if logo else 'not found'}"
-    return "", note + " | placeholder/none and no station name"
+    # No real cover: for radio, moOde stores logos as radio-logos/<station name>.jpg.
+    # The station name is MPD's "name" tag or moOde's "album" field (unless "Unknown station").
+    for name in (station, album) if is_radio else ():
+        if name and name.lower() != "unknown station":
+            logo = find_station_logo(host, name)
+            if logo:
+                return logo, note + f" | logo found via station name {name!r}"
+    return "", note + " | no usable cover or station logo"
 
 SR_STREAM_RE = re.compile(r"sverigesradio\.se/topsy/direkt/(\d+)", re.I)
 _sr_cache = {}   # key -> (data, expiry)
@@ -373,7 +382,7 @@ def check_moode(instance):
             # moOde's own cover (local art, embedded art, radio logos) beats an iTunes guess
             is_radio = str(song.get("file", "")).startswith("http")
             station = song.get("name", "") if is_radio else ""
-            rel, art_debug = fetch_moode_art(instance["host"], station)
+            rel, art_debug = fetch_moode_art(instance["host"], station, is_radio)
             art = _moode_abs(instance["host"], rel) if rel else info["art"]
         else:
             info = {"art": "/static/idle.png", "year": "", "album": "", "genre": ""}
