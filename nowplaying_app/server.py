@@ -20,13 +20,14 @@ try:
 except Exception:
     pass
 
+import socket
 import subprocess
 import wave
 import requests
 import sounddevice as sd
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from shazamio import Shazam
@@ -36,8 +37,6 @@ import history
 os.dup2(old_stderr, 2)
 os.close(old_stderr)
 os.close(devnull)
-
-#app = FastAPI(lifespan=lifespan)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -81,6 +80,30 @@ DEFAULT_CONFIG = {
     "sample_rate": 16000,
     "moodes": []
 }
+
+def _local_addresses():
+    """Loopback plus this machine's own addresses (a kiosk browser may use the LAN IP)."""
+    addrs = {"127.0.0.1", "::1"}
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            addrs.add(info[4][0])
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))   # no packet is sent; just picks the LAN interface
+        addrs.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    return addrs
+
+def is_local_request(request: Request) -> bool:
+    """True only for requests coming from the Pi itself (e.g. the kiosk browser)."""
+    host = request.client.host if request.client else ""
+    if host.startswith("::ffff:"):
+        host = host[7:]
+    return host in _local_addresses()
 
 def is_service_active(service_name):
     try:
@@ -221,8 +244,18 @@ def fetch_online_info(artist, title):
         pass
     return default
 
-def fetch_online_coverart(artist, title):
-    return fetch_online_info(artist, title)["art"]
+def fetch_moode_art(host):
+    """Ask moOde itself for the cover of the current track. Returns '' if unavailable."""
+    try:
+        data = requests.get(f"http://{host}/command/?cmd=get_currentsong", timeout=2).json()
+        url = (data.get("coverurl") or "").strip()
+        if not url or "default-album-cover" in url or "default-cover" in url:
+            return ""   # moOde only has its placeholder; let the caller fall back
+        if url.startswith(("http://", "https://")):
+            return url
+        return f"http://{host}/{url.lstrip('/')}"
+    except Exception:
+        return ""
 
 def check_moode(instance):
     try:
@@ -238,9 +271,11 @@ def check_moode(instance):
         artist = song.get("artist", "")
         if is_playing:
             info = fetch_online_info(artist, title)
+            # moOde's own cover (local art, embedded art, radio logos) beats an iTunes guess
+            art = fetch_moode_art(instance["host"]) or info["art"]
         else:
             info = {"art": "/static/idle.png", "year": "", "album": "", "genre": ""}
-        art = info["art"]
+            art = info["art"]
         # Prefer MPD tags (usually more accurate), fall back to iTunes
         year = extract_year(song.get("date") or song.get("originaldate")) or info["year"]
         album = song.get("album") or info["album"]
@@ -272,17 +307,6 @@ def check_moode(instance):
         }
 
 
-
-#def record_audio(duration):
-#    recording = sd.rec(int(duration * 44100), samplerate=44100, channels=1, dtype='int16')
-#    sd.wait()
-#    wav_io = io.BytesIO()
-#    with wave.open(wav_io, 'wb') as wf:
-#        wf.setnchannels(1)
-#        wf.setsampwidth(2)
-#        wf.setframerate(44100)
-#        wf.writeframes(recording.tobytes())
-#    return wav_io.getvalue()
 
 def record_audio(duration):
     cfg = load_config()
@@ -409,23 +433,6 @@ async def background_mic_listener():
             latest_ambient_state["artist"] = "Disabled in settings"
             await asyncio.sleep(5)
 
-#@app.on_event("startup")
-#async def startup_event():
-#    asyncio.create_task(background_mic_listener())
-#    cfg = load_config()
-#    set_screen_rotation(cfg.get("screen_rotation", "normal"))
-
-#@asynccontextmanager
-#async def lifespan(app: FastAPI):
-    # --- Startup Logic ---
-#    asyncio.create_task(background_mic_listener())
-#    cfg = load_config()
-#    set_screen_rotation(cfg.get("screen_rotation", "normal"))
-
-#    yield
-
-#app = FastAPI(lifespan=lifespan)
-
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     cfg = load_config()
@@ -445,7 +452,7 @@ async def settings_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
-        context={"config": cfg, "system": system_status}
+        context={"config": cfg, "system": system_status, "is_local": is_local_request(request)}
     )
 
 @app.post("/settings/save")
@@ -488,13 +495,17 @@ async def save_settings(request: Request):
     enable_ssh = form.get("ssh_enabled") == "on"
 
     set_service_state("kiosk", enable_kiosk)
-    set_service_state("ssh", enable_ssh)
+    # SSH can only be changed from the Pi itself; remote requests leave it untouched
+    if is_local_request(request):
+        set_service_state("ssh", enable_ssh)
     set_screen_rotation(cfg["screen_rotation"])
 
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/system/reboot")
-async def reboot_system():
+async def reboot_system(request: Request):
+    if not is_local_request(request):
+        return JSONResponse({"error": "Only allowed from the Pi itself"}, status_code=403)
     try:
         subprocess.run(["sudo", "reboot"], check=True)
         return {"status": "Rebooting..."}
@@ -502,7 +513,9 @@ async def reboot_system():
         return {"error": str(e)}
 
 @app.post("/system/shutdown")
-async def shutdown_system():
+async def shutdown_system(request: Request):
+    if not is_local_request(request):
+        return JSONResponse({"error": "Only allowed from the Pi itself"}, status_code=403)
     try:
         subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
         return {"status": "Shutting down..."}

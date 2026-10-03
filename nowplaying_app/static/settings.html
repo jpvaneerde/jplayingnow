@@ -37,10 +37,16 @@
                 <option value="left" {% if config.screen_rotation == 'left' %}selected{% endif %}>Rotate 270° Counter-Clockwise</option>
             </select>
             <hr style="border: 0; border-top: 1px solid #374151; margin: 20px 0;">
+            {% if is_local %}
             <label class="checkbox-label">
                 <input type="checkbox" name="ssh_enabled" {% if system.ssh_active %}checked{% endif %}>
                 Enable Remote SSH Access
             </label>
+            {% else %}
+            <p style="font-size: 0.85rem; color: #9ca3af; margin: 0;">
+                SSH: {{ "enabled" if system.ssh_active else "disabled" }}. Reboot, shutdown and SSH can only be changed from the Pi's own screen.
+            </p>
+            {% endif %}
         </div>
 
         <div class="card">
@@ -87,6 +93,7 @@
         <button type="submit" class="btn">Save & Apply Settings</button>
     </form>
 
+    {% if is_local %}
     <div class="card" style="margin-top: 30px; border: 1px solid #dc2626;">
         <h3 style="color: #ef4444; margin-top:0;">Power Controls</h3>
         <p style="font-size: 0.85rem; color: #9ca3af;">Safely reboot or shut down the Raspberry Pi system.</p>
@@ -95,6 +102,7 @@
             <button class="btn btn-danger" onclick="systemAction('shutdown')">Shutdown System</button>
         </div>
     </div>
+    {% endif %}
 
     <script>
         function addMoodeRow() {
