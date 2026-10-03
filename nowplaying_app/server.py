@@ -2,10 +2,28 @@ import asyncio
 import io
 import json
 import os
+import ctypes
+
+devnull = os.open(os.devnull, os.O_WRONLY)
+old_stderr = os.dup(2)
+os.dup2(devnull, 2)
+
+ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+def py_error_handler(filename, line, function, err, fmt):
+    pass
+c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+
+try:
+    asound = ctypes.cdll.LoadLibrary('libasound.so.2')
+    asound.snd_lib_error_set_handler(c_error_handler)
+except Exception:
+    pass
+
 import subprocess
 import wave
 import requests
 import sounddevice as sd
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,9 +31,24 @@ from fastapi.templating import Jinja2Templates
 from shazamio import Shazam
 from mpd import MPDClient
 
-app = FastAPI()
+os.dup2(old_stderr, 2)
+os.close(old_stderr)
+os.close(devnull)
 
-templates = Jinja2Templates(directory="templates")
+#app = FastAPI(lifespan=lifespan)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Startup Logic ---
+    asyncio.create_task(background_mic_listener())
+    cfg = load_config()
+    set_screen_rotation(cfg.get("screen_rotation", "normal"))
+
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+templates = Jinja2Templates(directory="static")
 os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -114,16 +147,58 @@ def check_moode(instance):
             "coverart": "/static/offline.png"
         }
 
+
+
+#def record_audio(duration):
+#    recording = sd.rec(int(duration * 44100), samplerate=44100, channels=1, dtype='int16')
+#    sd.wait()
+#    wav_io = io.BytesIO()
+#    with wave.open(wav_io, 'wb') as wf:
+#        wf.setnchannels(1)
+#        wf.setsampwidth(2)
+#        wf.setframerate(44100)
+#        wf.writeframes(recording.tobytes())
+#    return wav_io.getvalue()
+
 def record_audio(duration):
-    recording = sd.rec(int(duration * 44100), samplerate=44100, channels=1, dtype='int16')
-    sd.wait()
-    wav_io = io.BytesIO()
-    with wave.open(wav_io, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(44100)
-        wf.writeframes(recording.tobytes())
-    return wav_io.getvalue()
+    MIC_DEVICE = 1
+
+    # Try standard webcam rates in order of preference
+    for sample_rate in [16000, 48000, 44100]:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stderr = os.dup(2)
+        os.dup2(devnull, 2)
+
+        try:
+            recording = sd.rec(
+                int(duration * sample_rate),
+                samplerate=sample_rate,
+                channels=1,
+                dtype="int16",
+                device=MIC_DEVICE,
+            )
+            sd.wait()
+
+            # If recording succeeded, compile WAV buffer and break out
+            wav_io = io.BytesIO()
+            with wave.open(wav_io, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(recording.tobytes())
+
+            return wav_io.getvalue()
+
+        except Exception:
+            continue
+        finally:
+            os.dup2(old_stderr, 2)
+            os.close(old_stderr)
+            os.close(devnull)
+
+    raise RuntimeError(
+        "Failed to capture audio at supported sample rates (16kHz, 48kHz, 44.1kHz)."
+    )
 
 async def background_mic_listener():
     global latest_ambient_state
@@ -159,16 +234,31 @@ async def background_mic_listener():
             latest_ambient_state["artist"] = "Disabled in settings"
             await asyncio.sleep(5)
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(background_mic_listener())
-    cfg = load_config()
-    set_screen_rotation(cfg.get("screen_rotation", "normal"))
+#@app.on_event("startup")
+#async def startup_event():
+#    asyncio.create_task(background_mic_listener())
+#    cfg = load_config()
+#    set_screen_rotation(cfg.get("screen_rotation", "normal"))
+
+#@asynccontextmanager
+#async def lifespan(app: FastAPI):
+    # --- Startup Logic ---
+#    asyncio.create_task(background_mic_listener())
+#    cfg = load_config()
+#    set_screen_rotation(cfg.get("screen_rotation", "normal"))
+
+#    yield
+
+#app = FastAPI(lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     cfg = load_config()
-    return templates.TemplateResponse("index.html", {"request": request, "config": cfg})
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"config": cfg}
+    )
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
