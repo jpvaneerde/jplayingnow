@@ -59,8 +59,13 @@
         .grid .info { flex: none; }
         .focus .info { flex: 1; }
 
-        img { flex: 1 1 0; min-height: 0; width: 100%; border-radius: 12px; object-fit: cover; margin-top: 0.4em; }
-        .focus img { flex: none; height: 100%; width: auto; aspect-ratio: 1; margin-top: 0; }
+        /* Cover art is always square, sized to the largest square that fits */
+        .cover { min-width: 0; min-height: 0; }
+        .grid .cover { flex: 1 1 0; container-type: size; display: flex; align-items: center; justify-content: center; margin-top: 0.4em; }
+        .grid .cover img { flex: none; width: min(100cqw, 100cqh); height: min(100cqw, 100cqh); }
+        .focus .cover { flex: none; height: 100%; aspect-ratio: 1; }
+        .cover img { display: block; border-radius: 12px; object-fit: cover; }
+        .focus .cover img { width: 100%; height: 100%; }
 
         .badge { position: absolute; top: 8px; right: 8px; font-size: 0.7em; padding: 2px 8px; border-radius: 8px; background: #555; color: #fff; z-index: 1; }
         .badge.playing { background: #10b981; }
@@ -101,7 +106,7 @@
             return `
                 <div class="card ${cls}" ${style ? `style="${style}"` : ''}>
                     <span class="badge ${badgeCls}">${esc(badge)}</span>
-                    <img src="${safeUrl(cover)}">
+                    <div class="cover"><img src="${safeUrl(cover)}"></div>
                     <div class="info">
                         <div class="name" style="${nameStyle}">${esc(name)}</div>
                         <div class="title">${esc(title)}</div>
@@ -148,7 +153,7 @@
             const focus = container.classList.contains('focus');
             container.querySelectorAll('.card').forEach(card => {
                 const info = card.querySelector('.info');
-                const img = card.querySelector('img');
+                const img = card.querySelector('.cover');
                 let fit = 1;
                 const ok = () => {
                     if (card.scrollHeight > card.clientHeight + 1) return false;

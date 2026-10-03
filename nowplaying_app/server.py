@@ -137,6 +137,45 @@ def extract_year(value):
     m = re.search(r"\b(1[89]\d{2}|20\d{2})\b", str(value or ""))
     return m.group(1) if m else ""
 
+_COMPILATION_WORDS = re.compile(
+    r"\b(greatest hits|best of|compilation|karaoke|tribute|essentials?|collection|"
+    r"now that|anthology|hits|playlist|remixes|live)\b",
+    re.I,
+)
+
+def _norm(s):
+    s = re.sub(r"\(.*?\)|\[.*?\]", " ", str(s or "").lower())  # drop (feat. x), [Remastered]
+    s = re.sub(r"\s+-\s+.*$", "", s)                            # drop "- 2011 Remaster"
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+def pick_best_match(results, artist, title):
+    """Choose the iTunes result that best matches artist+title, preferring original albums."""
+    t, a = _norm(title), _norm(artist)
+    best, best_score = None, 0
+    for r in results:
+        rt, ra = _norm(r.get("trackName")), _norm(r.get("artistName"))
+        score = 0
+        if rt == t:
+            score += 4
+        elif t and (t in rt or rt in t):
+            score += 1
+        if a and (ra == a):
+            score += 4
+        elif a and (a in ra or ra in a):
+            score += 2
+        if score < 5:               # need title AND artist to be reasonably close
+            continue
+        album = r.get("collectionName", "")
+        if r.get("collectionArtistName", "").lower() == "various artists":
+            score -= 3
+        if _COMPILATION_WORDS.search(album):
+            score -= 2
+        if r.get("collectionType") == "Album" and r.get("trackCount", 0) > 30:
+            score -= 1
+        if score > best_score:
+            best, best_score = r, score
+    return best
+
 def fetch_online_info(artist, title):
     """Return dict(art, year, album, genre) from iTunes. Cached per track."""
     default = {"art": "/static/default_cover.png", "year": "", "album": "", "genre": ""}
@@ -148,11 +187,11 @@ def fetch_online_info(artist, title):
     try:
         res = requests.get(
             "https://itunes.apple.com/search",
-            params={"term": f"{artist} {title}".strip(), "limit": 1},
-            timeout=2,
+            params={"term": f"{artist} {title}".strip(), "entity": "song", "limit": 10},
+            timeout=3,
         ).json()
-        if res.get("resultCount", 0) > 0:
-            r = res["results"][0]
+        r = pick_best_match(res.get("results", []), artist, title)
+        if r:
             info = {
                 "art": r["artworkUrl100"].replace("100x100bb", "600x600bb"),
                 "year": extract_year(r.get("releaseDate")),
@@ -290,10 +329,14 @@ async def background_mic_listener():
                     images = track.get("images", {})
                     cover = images.get("coverarthq", images.get("coverart", "/static/default_cover.png"))
                     year = ""
+                    shazam_album = ""
                     for section in track.get("sections", []):
                         for item in section.get("metadata", []):
-                            if str(item.get("title", "")).lower() == "released":
+                            label = str(item.get("title", "")).lower()
+                            if label == "released":
                                 year = extract_year(item.get("text"))
+                            elif label == "album":
+                                shazam_album = item.get("text", "")
                     info = await loop.run_in_executor(
                         None, fetch_online_info,
                         track.get("subtitle", ""), track.get("title", "")
@@ -304,7 +347,7 @@ async def background_mic_listener():
                         "title": track.get("title", "Unknown Title"),
                         "artist": track.get("subtitle", "Unknown Artist"),
                         "year": year,
-                        "album": info["album"],
+                        "album": shazam_album or info["album"],
                         "genre": track.get("genres", {}).get("primary") or info["genre"],
                         "coverart": cover
                     }
