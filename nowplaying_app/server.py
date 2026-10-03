@@ -24,7 +24,7 @@ import socket
 import subprocess
 import time
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import wave
 import requests
 import sounddevice as sd
@@ -254,7 +254,9 @@ _logo_cache = {}   # (host, station) -> (url, expiry timestamp)
 def _moode_abs(host, url):
     if url.startswith(("http://", "https://")):
         return url
-    return f"http://{host}/{url.lstrip('/')}"
+    # moOde may send encoded slashes ("imagesw%2Fradio-logos%2FBBC%20Radio%201.jpg"),
+    # which nginx won't serve; decode, then re-encode everything except the slashes.
+    return f"http://{host}/{quote(unquote(url).lstrip('/'), safe='/')}"
 
 def _moode_debug(host, message):
     """Print only when the message changes, so the log isn't flooded every poll."""
@@ -296,7 +298,7 @@ def fetch_moode_art(host, station=""):
         except Exception as e:
             _moode_debug(host, f"{endpoint} failed: {e}")
     # moOde placeholders are all named default-*.jpg/png/svg (default-radio-cover.jpg, ...)
-    if url and not url.rsplit("/", 1)[-1].lower().startswith("default"):
+    if url and not unquote(url).rsplit("/", 1)[-1].lower().startswith("default"):
         return _moode_abs(host, url)
     if station:
         return find_station_logo(host, station)
