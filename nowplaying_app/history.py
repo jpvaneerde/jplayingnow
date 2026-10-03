@@ -43,7 +43,14 @@ def init_db(path):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plays_genre ON plays(genre)")
 
 
-def log_play(source, title, artist="", album="", genre="", year="", coverart=""):
+def purge_other_sources(keep):
+    """Delete plays from any source other than `keep` (e.g. old moOde entries)."""
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM plays WHERE source != ?", (keep,))
+    _last_logged.clear()
+
+
+def log_play(source, title, artist="", album="", genre="", year="", coverart="", played_at=None):
     """Record a play if it differs from the last one logged for this source."""
     title, artist = (title or "").strip(), (artist or "").strip()
     if not title or title.lower() in SKIP_TITLES:
@@ -64,7 +71,7 @@ def log_play(source, title, artist="", album="", genre="", year="", coverart="")
             conn.execute(
                 "INSERT INTO plays (ts, source, title, artist, album, genre, year, coverart) "
                 "VALUES (?,?,?,?,?,?,?,?)",
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), source, title, artist,
+                ((played_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"), source, title, artist,
                  album or "", genre or "", year or "", coverart or ""),
             )
         _last_logged[source] = key

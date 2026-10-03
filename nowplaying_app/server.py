@@ -22,6 +22,9 @@ except Exception:
 
 import socket
 import subprocess
+import time
+from datetime import datetime
+from urllib.parse import quote
 import wave
 import requests
 import sounddevice as sd
@@ -42,6 +45,7 @@ os.close(devnull)
 async def lifespan(app: FastAPI):
     # --- Startup Logic ---
     history.init_db(HISTORY_DB)
+    history.purge_other_sources(MIC_SOURCE_NAME)   # history holds mic-detected songs only
     tasks = [
         asyncio.create_task(background_mic_listener()),
         asyncio.create_task(background_moode_poller()),
@@ -244,18 +248,87 @@ def fetch_online_info(artist, title):
         pass
     return default
 
-def fetch_moode_art(host):
-    """Ask moOde itself for the cover of the current track. Returns '' if unavailable."""
+_moode_debug_last = {}
+_logo_cache = {}   # (host, station) -> (url, expiry timestamp)
+
+def _moode_abs(host, url):
+    if url.startswith(("http://", "https://")):
+        return url
+    return f"http://{host}/{url.lstrip('/')}"
+
+def _moode_debug(host, message):
+    """Print only when the message changes, so the log isn't flooded every poll."""
+    if _moode_debug_last.get(host) != message:
+        _moode_debug_last[host] = message
+        print(f"[moOde {host}] {message}")
+
+def find_station_logo(host, station):
+    """Look for the radio station logo in moOde's radio-logos folder. Cached."""
+    key = (host, station)
+    hit = _logo_cache.get(key)
+    if hit and hit[1] > time.time():
+        return hit[0]
+    found = ""
+    name = quote(station)
+    for path in (f"/imagesw/radio-logos/{name}.jpg", f"/imagesw/radio-logos/{name}.png",
+                 f"/imagesw/radio-logos/thumbs/{name}.jpg"):
+        url = f"http://{host}{path}"
+        try:
+            r = requests.head(url, timeout=2, allow_redirects=True)
+            if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+                found = url
+                break
+        except Exception:
+            break
+    _logo_cache[key] = (found, time.time() + (3600 if found else 120))
+    return found
+
+def fetch_moode_art(host, station=""):
+    """Ask moOde itself for the current cover; for radio, fall back to the station logo."""
+    url = ""
+    # engine-mpd.php?cmd=status is confirmed to return coverurl on this setup
+    for endpoint in ("engine-mpd.php?cmd=status", "command/?cmd=get_currentsong"):
+        try:
+            data = requests.get(f"http://{host}/{endpoint}", timeout=2).json()
+            url = (data.get("coverurl") or "").strip()
+            _moode_debug(host, f"{endpoint}: coverurl={url!r} station={station!r}")
+            break
+        except Exception as e:
+            _moode_debug(host, f"{endpoint} failed: {e}")
+    # moOde placeholders are all named default-*.jpg/png/svg (default-radio-cover.jpg, ...)
+    if url and not url.rsplit("/", 1)[-1].lower().startswith("default"):
+        return _moode_abs(host, url)
+    if station:
+        return find_station_logo(host, station)
+    return ""
+
+SR_STREAM_RE = re.compile(r"sverigesradio\.se/topsy/direkt/(\d+)", re.I)
+_sr_cache = {}   # key -> (data, expiry)
+
+def _sr_get(url, ttl):
+    hit = _sr_cache.get(url)
+    if hit and hit[1] > time.time():
+        return hit[0]
+    data = {}
     try:
-        data = requests.get(f"http://{host}/command/?cmd=get_currentsong", timeout=2).json()
-        url = (data.get("coverurl") or "").strip()
-        if not url or "default-album-cover" in url or "default-cover" in url:
-            return ""   # moOde only has its placeholder; let the caller fall back
-        if url.startswith(("http://", "https://")):
-            return url
-        return f"http://{host}/{url.lstrip('/')}"
-    except Exception:
-        return ""
+        data = requests.get(url, timeout=3).json()
+    except Exception as e:
+        print(f"Sveriges Radio API error: {e}")
+    _sr_cache[url] = (data, time.time() + ttl)
+    return data
+
+def fetch_sr_info(channel_id):
+    """Station name, logo and current song for a Sveriges Radio channel (open API, no key)."""
+    ch = _sr_get(f"https://api.sr.se/api/v2/channels/{channel_id}?format=json", 3600).get("channel", {})
+    now = _sr_get(f"https://api.sr.se/api/v2/playlists/rightnow?channelid={channel_id}&format=json", 20)
+    song = now.get("playlist", {}).get("song", {}) or {}
+    return {
+        "station": ch.get("name", ""),
+        "image": ch.get("image") or ch.get("imagetemplate") or "",
+        "title": song.get("title", ""),
+        "artist": song.get("artist") or song.get("composer") or "",
+        "album": song.get("albumname", ""),
+    }
 
 def check_moode(instance):
     try:
@@ -269,10 +342,22 @@ def check_moode(instance):
         is_playing = status.get("state") == "play"
         title = song.get("title", song.get("name", "Idle" if not is_playing else "Live Stream"))
         artist = song.get("artist", "")
-        if is_playing:
+        sr_match = SR_STREAM_RE.search(str(song.get("file", ""))) if is_playing else None
+        if sr_match:
+            # Sveriges Radio stream: use the SR open API for station logo and current song
+            sr = fetch_sr_info(sr_match.group(1))
+            if not song.get("title"):               # stream sends no metadata of its own
+                title = sr["title"] or sr["station"] or title
+                artist = sr["artist"] or (sr["station"] if sr["title"] else "")
+            info = {"art": sr["image"] or "/static/default_cover.png", "year": "",
+                    "album": sr["album"], "genre": ""}
+            art = info["art"]
+        elif is_playing:
             info = fetch_online_info(artist, title)
             # moOde's own cover (local art, embedded art, radio logos) beats an iTunes guess
-            art = fetch_moode_art(instance["host"]) or info["art"]
+            is_radio = str(song.get("file", "")).startswith("http")
+            station = song.get("name", "") if is_radio else ""
+            art = fetch_moode_art(instance["host"], station) or info["art"]
         else:
             info = {"art": "/static/idle.png", "year": "", "album": "", "genre": ""}
             art = info["art"]
@@ -354,7 +439,7 @@ def record_audio(duration):
 moode_state = {}
 
 async def background_moode_poller():
-    """Poll enabled moOde players, cache their state, and log plays to history."""
+    """Poll enabled moOde players and cache their state for the display."""
     global moode_state
     loop = asyncio.get_running_loop()
     while True:
@@ -364,16 +449,14 @@ async def background_moode_poller():
             results = await asyncio.gather(
                 *(loop.run_in_executor(None, check_moode, i) for i in instances)
             )
-            moode_state = {r["id"]: r for r in results}
-            for r in results:
-                if r.get("playing"):
-                    await loop.run_in_executor(
-                        None, history.log_play, r["name"], r.get("title"), r.get("artist"),
-                        r.get("album"), r.get("genre"), r.get("year"), r.get("coverart"),
-                    )
+            moode_state = {r["id"]: r for r in results}  # display only; not logged to history
         except Exception as e:
             print(f"moOde poller error: {e}")
         await asyncio.sleep(3)
+
+MIN_PLAY_SECONDS = 20          # a song must be heard this long before it enters history
+MIC_SOURCE_NAME = "Ambient Listener (CD)"
+pending_play = {"key": None, "first": None, "last": None, "logged": False}
 
 async def background_mic_listener():
     global latest_ambient_state
@@ -415,15 +498,31 @@ async def background_mic_listener():
                         "genre": track.get("genres", {}).get("primary") or info["genre"],
                         "coverart": cover
                     }
+                    # Only log once the same song has been heard for MIN_PLAY_SECONDS
                     s = latest_ambient_state
-                    await loop.run_in_executor(
-                        None, history.log_play, s["name"], s["title"], s["artist"],
-                        s["album"], s["genre"], s["year"], s["coverart"],
-                    )
-                elif not latest_ambient_state.get("identified"):
+                    now = time.time()
+                    key = (s["title"].lower(), s["artist"].lower())
+                    if pending_play["key"] != key:
+                        pending_play.update(key=key, first=now - duration, last=now, logged=False)
+                    else:
+                        pending_play["last"] = now
+                    if not pending_play["logged"] and now - pending_play["first"] >= MIN_PLAY_SECONDS:
+                        pending_play["logged"] = True
+                        await loop.run_in_executor(
+                            None, lambda: history.log_play(
+                                s["name"], s["title"], s["artist"], s["album"], s["genre"],
+                                s["year"], s["coverart"],
+                                played_at=datetime.fromtimestamp(pending_play["first"]),
+                            )
+                        )
+                else:
+                    # Forget the candidate if the song has been gone for a while
+                    if pending_play["last"] and time.time() - pending_play["last"] > 40:
+                        pending_play.update(key=None, first=None, last=None, logged=False)
                     # Keep showing the last identified song if a later sample finds nothing
-                    latest_ambient_state["title"] = "No Song Identified"
-                    latest_ambient_state["artist"] = "Listening..."
+                    if not latest_ambient_state.get("identified"):
+                        latest_ambient_state["title"] = "No Song Identified"
+                        latest_ambient_state["artist"] = "Listening..."
             except Exception as e:
                 latest_ambient_state["title"] = "Mic Error"
                 latest_ambient_state["artist"] = str(e)
