@@ -1,0 +1,8 @@
+# Local to each device: settings and play history are never overwritten by git
+nowplaying_app/config.json
+nowplaying_app/config.json.tmp
+nowplaying_app/data/
+
+__pycache__/
+*.pyc
+.venv/

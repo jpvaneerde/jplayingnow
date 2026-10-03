@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Play History</title>
+    <style>
+        body.dark  { --bg: #0f111a; --fg: #fff;    --card: rgba(255,255,255,0.06); --muted: #9ca3af; --accent: #3b82f6; --line: rgba(255,255,255,0.1); }
+        body.light { --bg: #f3f4f6; --fg: #111827; --card: #ffffff;                --muted: #6b7280; --accent: #2563eb; --line: rgba(0,0,0,0.1); }
+        body.retro { --bg: #1c1917; --fg: #f59e0b; --card: rgba(245,158,11,0.08); --muted: #b45309; --accent: #f59e0b; --line: rgba(245,158,11,0.25); }
+        body { background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 1000px; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+        h1 { margin: 0; font-size: 1.4rem; }
+        a { color: var(--muted); text-decoration: none; }
+        .btn { background: var(--accent); color: #fff; border: 0; padding: 8px 14px; border-radius: 8px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 0.9rem; }
+        .btn.secondary { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+        .filters { background: var(--card); border-radius: 12px; padding: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; align-items: end; margin-bottom: 12px; }
+        .filters label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 3px; }
+        .filters input, .filters select { width: 100%; box-sizing: border-box; padding: 7px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+        .filters .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+        .tab { padding: 7px 14px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); cursor: pointer; font-weight: bold; font-size: 0.9rem; }
+        .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .summary { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+        .stat { background: var(--card); border-radius: 12px; padding: 10px 16px; }
+        .stat b { font-size: 1.4rem; display: block; }
+        .stat span { font-size: 0.75rem; color: var(--muted); }
+        .play { display: flex; align-items: center; gap: 12px; background: var(--card); border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; }
+        .play img, .rank img { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; flex: none; background: var(--line); }
+        .play .main, .rank .main { flex: 1; min-width: 0; }
+        .t { font-weight: bold; overflow-wrap: anywhere; }
+        .s { font-size: 0.85rem; color: var(--muted); overflow-wrap: anywhere; }
+        .when { font-size: 0.8rem; color: var(--muted); text-align: right; flex: none; }
+        .clickable { cursor: pointer; }
+        .clickable:hover { text-decoration: underline; }
+        .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+        .panel { background: var(--card); border-radius: 12px; padding: 12px; }
+        .panel h3 { margin: 0 0 8px; font-size: 1rem; }
+        .rank { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+        .rank .n { width: 1.6em; color: var(--muted); text-align: right; flex: none; }
+        .count { font-weight: bold; flex: none; }
+        .bar { height: 4px; background: var(--accent); border-radius: 2px; margin-top: 4px; }
+        .empty { color: var(--muted); padding: 20px; text-align: center; }
+        #more { display: block; margin: 10px auto; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body class="{{ config.theme }}">
+    <header>
+        <h1>Play History</h1>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <a href="/">← Display</a>
+            <a href="/settings">Settings</a>
+        </div>
+    </header>
+
+    <div class="filters">
+        <div><label>From</label><input type="date" id="f-start"></div>
+        <div><label>To</label><input type="date" id="f-end"></div>
+        <div><label>Genre</label><select id="f-genre"><option value="">All genres</option></select></div>
+        <div><label>Artist</label><input type="text" id="f-artist" list="artist-list" placeholder="Any artist"><datalist id="artist-list"></datalist></div>
+        <div><label>Source</label><select id="f-source"><option value="">All sources</option></select></div>
+        <div class="actions">
+            <button class="btn" id="apply">Apply</button>
+            <button class="btn secondary" id="reset">Reset</button>
+            <a class="btn secondary" id="export" href="/api/history/export.csv">CSV</a>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" data-tab="log">History</div>
+        <div class="tab" data-tab="stats">Most played</div>
+    </div>
+
+    <section id="view-log">
+        <div id="log-count" class="s" style="margin-bottom:8px;"></div>
+        <div id="log"></div>
+        <button class="btn secondary hidden" id="more">Load more</button>
+    </section>
+
+    <section id="view-stats" class="hidden">
+        <div class="summary" id="summary"></div>
+        <div class="grid2">
+            <div class="panel"><h3>Top tracks</h3><div id="top-tracks"></div></div>
+            <div class="panel"><h3>Top artists</h3><div id="top-artists"></div></div>
+            <div class="panel"><h3>Top albums</h3><div id="top-albums"></div></div>
+            <div class="panel"><h3>Top genres</h3><div id="top-genres"></div></div>
+        </div>
+    </section>
+
+    <script>
+        const $ = id => document.getElementById(id);
+        const PAGE = 100;
+        let offset = 0, shown = 0;
+
+        function esc(v) {
+            return String(v ?? '').replace(/[&<>"']/g, c => (
+                { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+            ));
+        }
+        function safeUrl(url) {
+            const u = String(url ?? '');
+            return (u.startsWith('/') && !u.startsWith('//')) || /^https?:\/\//i.test(u) ? esc(u) : '/static/default_cover.png';
+        }
+        function filterQuery() {
+            const p = new URLSearchParams();
+            [['start', 'f-start'], ['end', 'f-end'], ['genre', 'f-genre'], ['artist', 'f-artist'], ['source', 'f-source']]
+                .forEach(([k, id]) => { if ($(id).value) p.set(k, $(id).value); });
+            return p;
+        }
+        function fmtTime(ts) {
+            // ts is local time 'YYYY-MM-DD HH:MM:SS'
+            const [d, t] = ts.split(' ');
+            return `<div>${esc(d)}</div><div>${esc(t.slice(0, 5))}</div>`;
+        }
+
+        async function loadOptions() {
+            const o = await (await fetch('/api/history/options')).json();
+            const fill = (id, items) => {
+                const sel = $(id), cur = sel.value;
+                sel.querySelectorAll('option:not(:first-child)').forEach(x => x.remove());
+                items.forEach(v => { const op = document.createElement('option'); op.value = v; op.textContent = v; sel.appendChild(op); });
+                sel.value = cur;
+            };
+            fill('f-genre', o.genres);
+            fill('f-source', o.sources);
+            $('artist-list').innerHTML = o.artists.map(a => `<option value="${esc(a)}">`).join('');
+        }
+
+        async function loadLog(reset) {
+            if (reset) { offset = 0; shown = 0; $('log').innerHTML = ''; }
+            const p = filterQuery(); p.set('limit', PAGE); p.set('offset', offset);
+            const data = await (await fetch('/api/history?' + p)).json();
+            $('log').insertAdjacentHTML('beforeend', data.plays.map(r => `
+                <div class="play">
+                    <img src="${safeUrl(r.coverart)}" loading="lazy">
+                    <div class="main">
+                        <div class="t">${esc(r.title)}</div>
+                        <div class="s"><span class="clickable" data-artist="${esc(r.artist)}">${esc(r.artist)}</span>${r.album ? ' · ' + esc(r.album) : ''}</div>
+                        <div class="s">${esc([r.genre, r.year, r.source].filter(Boolean).join(' · '))}</div>
+                    </div>
+                    <div class="when">${fmtTime(r.ts)}</div>
+                </div>`).join(''));
+            offset += data.plays.length; shown = offset;
+            $('log-count').textContent = `${data.total} play${data.total === 1 ? '' : 's'}`;
+            $('more').classList.toggle('hidden', shown >= data.total);
+            if (data.total === 0) $('log').innerHTML = '<div class="empty">No plays found for these filters.</div>';
+        }
+
+        function rankList(items, render, key = 'plays') {
+            if (!items.length) return '<div class="empty">No data</div>';
+            const max = Math.max(...items.map(i => i[key]));
+            return items.map((i, n) => `
+                <div class="rank">
+                    <div class="n">${n + 1}</div>
+                    ${render(i)}
+                    <div class="count">${i[key]}</div>
+                </div>`).join('');
+        }
+
+        async function loadStats() {
+            const s = await (await fetch('/api/history/stats?' + filterQuery())).json();
+            $('summary').innerHTML = `
+                <div class="stat"><b>${s.totals.plays}</b><span>plays</span></div>
+                <div class="stat"><b>${s.totals.tracks}</b><span>unique tracks</span></div>
+                <div class="stat"><b>${s.totals.artists}</b><span>artists</span></div>`;
+            $('top-tracks').innerHTML = rankList(s.top_tracks, t => `
+                <img src="${safeUrl(t.coverart)}" loading="lazy">
+                <div class="main"><div class="t">${esc(t.title)}</div>
+                <div class="s"><span class="clickable" data-artist="${esc(t.artist)}">${esc(t.artist)}</span></div></div>`);
+            $('top-artists').innerHTML = rankList(s.top_artists, a => `
+                <div class="main"><div class="t clickable" data-artist="${esc(a.artist)}">${esc(a.artist)}</div>
+                <div class="s">last played ${esc(a.last_played.slice(0, 10))}</div></div>`);
+            $('top-albums').innerHTML = rankList(s.top_albums, a => `
+                <img src="${safeUrl(a.coverart)}" loading="lazy">
+                <div class="main"><div class="t">${esc(a.album)}</div><div class="s">${esc(a.artist)}</div></div>`);
+            $('top-genres').innerHTML = rankList(s.top_genres, g => `
+                <div class="main"><div class="t">${esc(g.genre)}</div>
+                <div class="bar" style="width:${Math.round(100 * g.plays / s.top_genres[0].plays)}%"></div></div>`);
+        }
+
+        let tab = 'log';
+        function refresh() {
+            $('export').href = '/api/history/export.csv?' + filterQuery();
+            if (tab === 'log') loadLog(true); else loadStats();
+        }
+        function setTab(t) {
+            tab = t;
+            document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === t));
+            $('view-log').classList.toggle('hidden', t !== 'log');
+            $('view-stats').classList.toggle('hidden', t !== 'stats');
+            refresh();
+        }
+
+        document.querySelectorAll('.tab').forEach(x => x.addEventListener('click', () => setTab(x.dataset.tab)));
+        $('apply').addEventListener('click', refresh);
+        $('reset').addEventListener('click', () => {
+            ['f-start', 'f-end', 'f-genre', 'f-artist', 'f-source'].forEach(id => $(id).value = '');
+            refresh();
+        });
+        $('more').addEventListener('click', () => loadLog(false));
+        // Click an artist anywhere to filter by them
+        document.addEventListener('click', e => {
+            const a = e.target.closest('[data-artist]');
+            if (a && a.dataset.artist) { $('f-artist').value = a.dataset.artist; refresh(); window.scrollTo(0, 0); }
+        });
+
+        loadOptions().then(refresh);
+    </script>
+</body>
+</html>

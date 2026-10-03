@@ -26,11 +26,12 @@ import requests
 import sounddevice as sd
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from shazamio import Shazam
 from mpd import MPDClient
+import history
 
 os.dup2(old_stderr, 2)
 os.close(old_stderr)
@@ -41,17 +42,28 @@ os.close(devnull)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup Logic ---
-    asyncio.create_task(background_mic_listener())
+    history.init_db(HISTORY_DB)
+    tasks = [
+        asyncio.create_task(background_mic_listener()),
+        asyncio.create_task(background_moode_poller()),
+    ]
     cfg = load_config()
     set_screen_rotation(cfg.get("screen_rotation", "normal"))
 
     yield
 
+    for t in tasks:
+        t.cancel()
+
 app = FastAPI(lifespan=lifespan)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+# Local, untracked files: settings and history live on the device and are never overwritten by git
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+CONFIG_EXAMPLE_FILE = os.path.join(BASE_DIR, "config.example.json")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+HISTORY_DB = os.path.join(DATA_DIR, "history.db")
 
 os.makedirs(STATIC_DIR, exist_ok=True)
 templates = Jinja2Templates(directory=STATIC_DIR)
@@ -96,11 +108,14 @@ def set_screen_rotation(rotation: str):
 
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            cfg.update(json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    # Local config.json wins; on a fresh install fall back to the shipped example
+    for path in (CONFIG_FILE, CONFIG_EXAMPLE_FILE):
+        try:
+            with open(path, "r") as f:
+                cfg.update(json.load(f))
+            break
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
     return cfg
 
 def save_config(config_data):
@@ -312,6 +327,30 @@ def record_audio(duration):
         "Failed to capture audio at supported sample rates (16kHz, 48kHz, 44.1kHz)."
     )
 
+moode_state = {}
+
+async def background_moode_poller():
+    """Poll enabled moOde players, cache their state, and log plays to history."""
+    global moode_state
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            cfg = load_config()
+            instances = [i for i in cfg.get("moodes", []) if i.get("enabled", True)]
+            results = await asyncio.gather(
+                *(loop.run_in_executor(None, check_moode, i) for i in instances)
+            )
+            moode_state = {r["id"]: r for r in results}
+            for r in results:
+                if r.get("playing"):
+                    await loop.run_in_executor(
+                        None, history.log_play, r["name"], r.get("title"), r.get("artist"),
+                        r.get("album"), r.get("genre"), r.get("year"), r.get("coverart"),
+                    )
+        except Exception as e:
+            print(f"moOde poller error: {e}")
+        await asyncio.sleep(3)
+
 async def background_mic_listener():
     global latest_ambient_state
     while True:
@@ -343,6 +382,7 @@ async def background_mic_listener():
                     )
                     year = year or info["year"]
                     latest_ambient_state = {
+                        "identified": True,
                         "name": "Ambient Listener (CD)",
                         "title": track.get("title", "Unknown Title"),
                         "artist": track.get("subtitle", "Unknown Artist"),
@@ -351,7 +391,13 @@ async def background_mic_listener():
                         "genre": track.get("genres", {}).get("primary") or info["genre"],
                         "coverart": cover
                     }
-                else:
+                    s = latest_ambient_state
+                    await loop.run_in_executor(
+                        None, history.log_play, s["name"], s["title"], s["artist"],
+                        s["album"], s["genre"], s["year"], s["coverart"],
+                    )
+                elif not latest_ambient_state.get("identified"):
+                    # Keep showing the last identified song if a later sample finds nothing
                     latest_ambient_state["title"] = "No Song Identified"
                     latest_ambient_state["artist"] = "Listening..."
             except Exception as e:
@@ -463,13 +509,47 @@ async def shutdown_system():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/history", response_class=HTMLResponse)
+async def history_page(request: Request):
+    return templates.TemplateResponse(request=request, name="history.html", context={"config": load_config()})
+
+def _history_filters(request: Request):
+    q = request.query_params
+    return {k: q.get(k, "").strip() for k in ("start", "end", "genre", "artist", "source")}
+
+@app.get("/api/history")
+async def api_history(request: Request):
+    q = request.query_params
+    limit = to_int(q.get("limit"), 100, minimum=1, maximum=500)
+    offset = to_int(q.get("offset"), 0, minimum=0)
+    return await asyncio.to_thread(history.query_plays, _history_filters(request), limit, offset)
+
+@app.get("/api/history/stats")
+async def api_history_stats(request: Request):
+    limit = to_int(request.query_params.get("limit"), 20, minimum=1, maximum=100)
+    return await asyncio.to_thread(history.stats, _history_filters(request), limit)
+
+@app.get("/api/history/options")
+async def api_history_options():
+    return await asyncio.to_thread(history.filter_options)
+
+@app.get("/api/history/export.csv")
+async def api_history_export(request: Request):
+    data = await asyncio.to_thread(history.export_csv, _history_filters(request))
+    return Response(
+        content=data, media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="nowplaying_history.csv"'},
+    )
+
 @app.get("/api/dashboard")
 async def get_dashboard():
     cfg = load_config()
-    moode_data = []
-    for instance in cfg.get("moodes", []):
-        if instance.get("enabled", True):
-            moode_data.append(check_moode(instance))
+    # Served from the background poller's cache, so the page never waits on MPD
+    moode_data = [
+        moode_state[i["id"]]
+        for i in cfg.get("moodes", [])
+        if i.get("enabled", True) and i["id"] in moode_state
+    ]
 
     return {
         "config": cfg,
