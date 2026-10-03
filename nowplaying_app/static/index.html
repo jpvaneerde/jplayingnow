@@ -59,7 +59,7 @@
             return (u.startsWith('/') && !u.startsWith('//')) || /^https?:\/\//i.test(u) ? esc(u) : '/static/default_cover.png';
         }
 
-        function card({ name, nameStyle, cls, style, badge, badgeCls, cover, title, artist }) {
+        function card({ name, nameStyle, cls, style, badge, badgeCls, cover, title, artist, year }) {
             return `
                 <div class="card ${cls}" ${style ? `style="${style}"` : ''}>
                     <span class="badge ${badgeCls}">${esc(badge)}</span>
@@ -67,6 +67,7 @@
                     <img src="${safeUrl(cover)}">
                     <div class="title">${esc(title)}</div>
                     <div class="artist">${esc(artist)}</div>
+                    ${year ? `<div class="artist year">${esc(year)}</div>` : ''}
                 </div>`;
         }
 
@@ -84,7 +85,7 @@
                         name: m.name, nameStyle: 'font-size: 0.8rem; opacity:0.6',
                         cls: m.playing ? 'active' : '', badge: m.playing ? 'Playing' : 'Paused',
                         badgeCls: m.playing ? 'playing' : '',
-                        cover: m.coverart, title: m.title, artist: m.artist
+                        cover: m.coverart, title: m.title, artist: m.artist, year: m.year
                     });
                 });
 
@@ -92,7 +93,8 @@
                     html += card({
                         name: data.ambient.name, nameStyle: 'font-size: 0.8rem; color:#818cf8',
                         cls: 'active', style: 'border-color: #818cf8;', badge: 'Mic Active', badgeCls: 'playing',
-                        cover: data.ambient.coverart, title: data.ambient.title, artist: data.ambient.artist
+                        cover: data.ambient.coverart, title: data.ambient.title, artist: data.ambient.artist,
+                        year: data.ambient.year
                     });
                 }
                 container.innerHTML = html;

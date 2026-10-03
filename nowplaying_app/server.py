@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import ctypes
 
 devnull = os.open(os.devnull, os.O_WRONLY)
@@ -129,9 +130,21 @@ latest_ambient_state = {
     "coverart": "/static/idle.png"
 }
 
-def fetch_online_coverart(artist, title):
+_itunes_cache = {}
+
+def extract_year(value):
+    """Return a 4-digit year string from values like '1977', '1977-05-01', or ISO dates."""
+    m = re.search(r"\b(1[89]\d{2}|20\d{2})\b", str(value or ""))
+    return m.group(1) if m else ""
+
+def fetch_online_info(artist, title):
+    """Return (coverart_url, release_year) from iTunes. Cached per track."""
+    default = ("/static/default_cover.png", "")
     if not title or title in ["Idle", "Unknown Track", "Offline"]:
-        return "/static/default_cover.png"
+        return default
+    key = (artist, title)
+    if key in _itunes_cache:
+        return _itunes_cache[key]
     try:
         res = requests.get(
             "https://itunes.apple.com/search",
@@ -139,10 +152,21 @@ def fetch_online_coverart(artist, title):
             timeout=2,
         ).json()
         if res.get("resultCount", 0) > 0:
-            return res["results"][0]["artworkUrl100"].replace("100x100bb", "600x600bb")
+            r = res["results"][0]
+            info = (
+                r["artworkUrl100"].replace("100x100bb", "600x600bb"),
+                extract_year(r.get("releaseDate")),
+            )
+            if len(_itunes_cache) > 200:
+                _itunes_cache.clear()
+            _itunes_cache[key] = info
+            return info
     except Exception:
         pass
-    return "/static/default_cover.png"
+    return default
+
+def fetch_online_coverart(artist, title):
+    return fetch_online_info(artist, title)[0]
 
 def check_moode(instance):
     try:
@@ -156,7 +180,12 @@ def check_moode(instance):
         is_playing = status.get("state") == "play"
         title = song.get("title", song.get("name", "Idle" if not is_playing else "Live Stream"))
         artist = song.get("artist", "")
-        art = fetch_online_coverart(artist, title) if is_playing else "/static/idle.png"
+        if is_playing:
+            art, online_year = fetch_online_info(artist, title)
+        else:
+            art, online_year = "/static/idle.png", ""
+        # Prefer the MPD tag (often the album's actual year), fall back to iTunes
+        year = extract_year(song.get("date") or song.get("originaldate")) or online_year
 
         return {
             "id": instance["id"],
@@ -164,6 +193,7 @@ def check_moode(instance):
             "playing": is_playing,
             "title": title,
             "artist": artist,
+            "year": year if is_playing else "",
             "coverart": art
         }
     except Exception:
@@ -248,10 +278,20 @@ async def background_mic_listener():
                 if track:
                     images = track.get("images", {})
                     cover = images.get("coverarthq", images.get("coverart", "/static/default_cover.png"))
+                    year = ""
+                    for section in track.get("sections", []):
+                        for item in section.get("metadata", []):
+                            if str(item.get("title", "")).lower() == "released":
+                                year = extract_year(item.get("text"))
+                    if not year:
+                        year = fetch_online_info(
+                            track.get("subtitle", ""), track.get("title", "")
+                        )[1]
                     latest_ambient_state = {
                         "name": "Ambient Listener (CD)",
                         "title": track.get("title", "Unknown Title"),
                         "artist": track.get("subtitle", "Unknown Artist"),
+                        "year": year,
                         "coverart": cover
                     }
                 else:
@@ -299,11 +339,11 @@ async def settings_page(request: Request):
         "kiosk_active": is_service_active("kiosk"),
         "ssh_active": is_service_active("ssh")
     }
-    return templates.TemplateResponse("settings.html", {
-        "request": request, 
-        "config": cfg, 
-        "system": system_status
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="settings.html",
+        context={"config": cfg, "system": system_status}
+    )
 
 @app.post("/settings/save")
 async def save_settings(request: Request):
@@ -321,6 +361,7 @@ async def save_settings(request: Request):
     names = form.getlist("moode_name")
     hosts = form.getlist("moode_host")
     ports = form.getlist("moode_port")
+    enabled_rows = set(form.getlist("moode_enabled"))  # row indexes that are ticked
 
     updated_moodes = []
     for i, host in enumerate(hosts):
@@ -333,7 +374,8 @@ async def save_settings(request: Request):
             "id": f"moode_{len(updated_moodes)+1}",
             "name": name or f"moOde {len(updated_moodes)+1}",
             "host": host,
-            "port": port
+            "port": port,
+            "enabled": str(i) in enabled_rows
         })
 
     cfg["moodes"] = updated_moodes
@@ -369,7 +411,8 @@ async def get_dashboard():
     cfg = load_config()
     moode_data = []
     for instance in cfg.get("moodes", []):
-        moode_data.append(check_moode(instance))
+        if instance.get("enabled", True):
+            moode_data.append(check_moode(instance))
 
     return {
         "config": cfg,
