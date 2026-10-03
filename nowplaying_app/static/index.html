@@ -17,8 +17,24 @@
         img { width: 100%; height: 250px; border-radius: 12px; object-fit: cover; margin-top: 10px; }
         .badge { position: absolute; top: 12px; right: 12px; font-size: 0.7rem; padding: 3px 8px; border-radius: 8px; background: #555; color: #fff; }
         .badge.playing { background: #10b981; }
-        .title { font-size: 1.1rem; font-weight: bold; margin: 10px 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .artist { font-size: 0.9rem; opacity: 0.7; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        
+        /* Updated CSS for multiline wrapping */
+        .title { 
+            font-size: 1.1rem; 
+            font-weight: bold; 
+            margin: 10px 0 4px; 
+            white-space: normal;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        .artist { 
+            font-size: 0.9rem; 
+            opacity: 0.7; 
+            margin: 0; 
+            white-space: normal;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
     </style>
 </head>
 <body class="{{ config.theme }}">
