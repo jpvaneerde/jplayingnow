@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Now Playing Monitor</title>
+    <title>JPlaying Now</title>
     <style>
         body.dark { background: #0f111a; color: #fff; }
         body.light { background: #f3f4f6; color: #111827; }
@@ -30,7 +30,8 @@
         }
 
         header { display: flex; justify-content: space-between; align-items: center; flex: none; }
-        h1 { margin: 0; font-size: 1.5em; }
+        .logo { color: inherit; display: block; }
+        .logo svg { height: 2em; width: auto; display: block; }
         .settings-btn { background: #3b82f6; color: white; text-decoration: none; padding: 0.3em 0.8em; border-radius: 8px; font-weight: bold; font-size: 0.85em; }
 
         #container { flex: 1; min-height: 0; display: grid; gap: var(--pad); }
@@ -82,7 +83,18 @@
 <body class="{{ config.theme }}">
     <div id="app">
         <header>
-            <h1>Now Playing</h1>
+            <a href="/" class="logo" aria-label="JPlaying Now">
+                <svg viewBox="0 0 270 44" role="img" xmlns="http://www.w3.org/2000/svg">
+                    <!-- equalizer bars -->
+                    <g fill="#10b981">
+                        <rect x="2"  y="22" width="7" height="16" rx="3.5"/>
+                        <rect x="13" y="8"  width="7" height="30" rx="3.5"/>
+                        <rect x="24" y="15" width="7" height="23" rx="3.5"/>
+                    </g>
+                    <text x="44" y="35" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+                          font-size="32" font-weight="800" letter-spacing="-0.5" fill="currentColor">JPlaying<tspan fill="#10b981" dx="9">Now</tspan></text>
+                </svg>
+            </a>
             <span>
                 <a href="/history" class="settings-btn">History</a>
                 <a href="/settings" class="settings-btn">⚙️ Settings</a>
