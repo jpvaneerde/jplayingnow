@@ -138,8 +138,8 @@ def extract_year(value):
     return m.group(1) if m else ""
 
 def fetch_online_info(artist, title):
-    """Return (coverart_url, release_year) from iTunes. Cached per track."""
-    default = ("/static/default_cover.png", "")
+    """Return dict(art, year, album, genre) from iTunes. Cached per track."""
+    default = {"art": "/static/default_cover.png", "year": "", "album": "", "genre": ""}
     if not title or title in ["Idle", "Unknown Track", "Offline"]:
         return default
     key = (artist, title)
@@ -153,10 +153,12 @@ def fetch_online_info(artist, title):
         ).json()
         if res.get("resultCount", 0) > 0:
             r = res["results"][0]
-            info = (
-                r["artworkUrl100"].replace("100x100bb", "600x600bb"),
-                extract_year(r.get("releaseDate")),
-            )
+            info = {
+                "art": r["artworkUrl100"].replace("100x100bb", "600x600bb"),
+                "year": extract_year(r.get("releaseDate")),
+                "album": r.get("collectionName", ""),
+                "genre": r.get("primaryGenreName", ""),
+            }
             if len(_itunes_cache) > 200:
                 _itunes_cache.clear()
             _itunes_cache[key] = info
@@ -166,7 +168,7 @@ def fetch_online_info(artist, title):
     return default
 
 def fetch_online_coverart(artist, title):
-    return fetch_online_info(artist, title)[0]
+    return fetch_online_info(artist, title)["art"]
 
 def check_moode(instance):
     try:
@@ -181,11 +183,18 @@ def check_moode(instance):
         title = song.get("title", song.get("name", "Idle" if not is_playing else "Live Stream"))
         artist = song.get("artist", "")
         if is_playing:
-            art, online_year = fetch_online_info(artist, title)
+            info = fetch_online_info(artist, title)
         else:
-            art, online_year = "/static/idle.png", ""
-        # Prefer the MPD tag (often the album's actual year), fall back to iTunes
-        year = extract_year(song.get("date") or song.get("originaldate")) or online_year
+            info = {"art": "/static/idle.png", "year": "", "album": "", "genre": ""}
+        art = info["art"]
+        # Prefer MPD tags (usually more accurate), fall back to iTunes
+        year = extract_year(song.get("date") or song.get("originaldate")) or info["year"]
+        album = song.get("album") or info["album"]
+        genre = song.get("genre") or info["genre"]
+        if isinstance(genre, list):
+            genre = ", ".join(genre)
+        if isinstance(album, list):
+            album = album[0]
 
         return {
             "id": instance["id"],
@@ -194,6 +203,8 @@ def check_moode(instance):
             "title": title,
             "artist": artist,
             "year": year if is_playing else "",
+            "album": album if is_playing else "",
+            "genre": genre if is_playing else "",
             "coverart": art
         }
     except Exception:
@@ -283,15 +294,18 @@ async def background_mic_listener():
                         for item in section.get("metadata", []):
                             if str(item.get("title", "")).lower() == "released":
                                 year = extract_year(item.get("text"))
-                    if not year:
-                        year = fetch_online_info(
-                            track.get("subtitle", ""), track.get("title", "")
-                        )[1]
+                    info = await loop.run_in_executor(
+                        None, fetch_online_info,
+                        track.get("subtitle", ""), track.get("title", "")
+                    )
+                    year = year or info["year"]
                     latest_ambient_state = {
                         "name": "Ambient Listener (CD)",
                         "title": track.get("title", "Unknown Title"),
                         "artist": track.get("subtitle", "Unknown Artist"),
                         "year": year,
+                        "album": info["album"],
+                        "genre": track.get("genres", {}).get("primary") or info["genre"],
                         "coverart": cover
                     }
                 else:

@@ -2,47 +2,85 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Now Playing Monitor</title>
     <style>
         body.dark { background: #0f111a; color: #fff; }
         body.light { background: #f3f4f6; color: #111827; }
         body.retro { background: #1c1917; color: #f59e0b; }
-        body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; transition: all 0.3s; }
-        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .settings-btn { background: #3b82f6; color: white; text-decoration: none; padding: 8px 16px; border-radius: 8px; font-weight: bold; }
-        .grid { display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; }
-        .focus { display: flex; flex-direction: column; align-items: center; gap: 20px; }
-        .card { background: rgba(255,255,255,0.05); border-radius: 16px; padding: 20px; width: 280px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.3); position: relative; }
+        html, body { height: 100%; }
+        body { font-family: system-ui, sans-serif; margin: 0; overflow: hidden; transition: background 0.3s; }
+
+        /* Stretches to the display, capped at 800x480 (480x800 in portrait) */
+        #app {
+            --pad: clamp(6px, 2vmin, 14px);
+            width: min(100vw, 800px);
+            height: min(100vh, 480px);
+            margin: 0 auto;
+            padding: var(--pad);
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: var(--pad);
+            font-size: clamp(12px, 3vmin, 18px);
+        }
+        @media (orientation: portrait) {
+            #app { width: min(100vw, 480px); height: min(100vh, 800px); }
+        }
+
+        header { display: flex; justify-content: space-between; align-items: center; flex: none; }
+        h1 { margin: 0; font-size: 1.5em; }
+        .settings-btn { background: #3b82f6; color: white; text-decoration: none; padding: 0.3em 0.8em; border-radius: 8px; font-weight: bold; font-size: 0.85em; }
+
+        #container { flex: 1; min-height: 0; display: grid; gap: var(--pad); }
+        /* Grid mode: cards side by side, auto-wrapping, rows share the height */
+        #container.grid {
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+            grid-auto-rows: minmax(0, 1fr);
+        }
+        /* Focus mode: cards stacked, each with the cover on the left */
+        #container.focus { grid-template-columns: 1fr; grid-auto-rows: minmax(0, 1fr); }
+
+        .card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: var(--pad);
+            min-width: 0; min-height: 0;
+            display: flex; flex-direction: column;
+            text-align: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+            position: relative;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
         .card.active { border: 2px solid #10b981; }
-        img { width: 100%; height: 250px; border-radius: 12px; object-fit: cover; margin-top: 10px; }
-        .badge { position: absolute; top: 12px; right: 12px; font-size: 0.7rem; padding: 3px 8px; border-radius: 8px; background: #555; color: #fff; }
+        .focus .card { flex-direction: row; align-items: center; gap: var(--pad); text-align: left; }
+        .info { min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+        .grid .info { flex: none; }
+        .focus .info { flex: 1; }
+
+        img { flex: 1 1 0; min-height: 0; width: 100%; border-radius: 12px; object-fit: cover; margin-top: 0.4em; }
+        .focus img { flex: none; height: 100%; width: auto; aspect-ratio: 1; margin-top: 0; }
+
+        .badge { position: absolute; top: 8px; right: 8px; font-size: 0.7em; padding: 2px 8px; border-radius: 8px; background: #555; color: #fff; z-index: 1; }
         .badge.playing { background: #10b981; }
-        
-        /* Updated CSS for multiline wrapping */
-        .title { 
-            font-size: 1.1rem; 
-            font-weight: bold; 
-            margin: 10px 0 4px; 
-            white-space: normal;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-        }
-        .artist { 
-            font-size: 0.9rem; 
-            opacity: 0.7; 
-            margin: 0; 
-            white-space: normal;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-        }
+        .name { font-size: 0.8em; opacity: 0.6; }
+
+        .title { font-size: 1.1em; font-weight: bold; margin: 0.4em 0 0.15em; }
+        .artist { font-size: 0.9em; opacity: 0.7; margin: 0; }
+        .title, .artist { overflow-wrap: anywhere; }
+        /* Text is never cut off: JS shrinks .info font-size (--fit) until it fits */
+        .info { font-size: calc(1em * var(--fit, 1)); }
     </style>
 </head>
 <body class="{{ config.theme }}">
-    <header>
-        <h1>Now Playing</h1>
-        <a href="/settings" class="settings-btn">⚙️ Settings</a>
-    </header>
-    <div id="container" class="{{ config.display_mode }}"></div>
+    <div id="app">
+        <header>
+            <h1>Now Playing</h1>
+            <a href="/settings" class="settings-btn">⚙️ Settings</a>
+        </header>
+        <div id="container" class="{{ config.display_mode }}"></div>
+    </div>
     <script>
         const THEMES = ['dark', 'light', 'retro'];
         const MODES = ['grid', 'focus'];
@@ -59,15 +97,18 @@
             return (u.startsWith('/') && !u.startsWith('//')) || /^https?:\/\//i.test(u) ? esc(u) : '/static/default_cover.png';
         }
 
-        function card({ name, nameStyle, cls, style, badge, badgeCls, cover, title, artist, year }) {
+        function card({ name, nameStyle, cls, style, badge, badgeCls, cover, title, artist, year, album, genre }) {
             return `
                 <div class="card ${cls}" ${style ? `style="${style}"` : ''}>
                     <span class="badge ${badgeCls}">${esc(badge)}</span>
-                    <div style="${nameStyle}">${esc(name)}</div>
                     <img src="${safeUrl(cover)}">
-                    <div class="title">${esc(title)}</div>
-                    <div class="artist">${esc(artist)}</div>
-                    ${year ? `<div class="artist year">${esc(year)}</div>` : ''}
+                    <div class="info">
+                        <div class="name" style="${nameStyle}">${esc(name)}</div>
+                        <div class="title">${esc(title)}</div>
+                        <div class="artist">${esc(artist)}</div>
+                        ${album ? `<div class="artist">${esc(album)}</div>` : ''}
+                        ${(genre || year) ? `<div class="artist">${esc([genre, year].filter(Boolean).join(' · '))}</div>` : ''}
+                    </div>
                 </div>`;
         }
 
@@ -82,24 +123,46 @@
                 let html = '';
                 data.moodes.forEach(m => {
                     html += card({
-                        name: m.name, nameStyle: 'font-size: 0.8rem; opacity:0.6',
+                        name: m.name, nameStyle: '',
                         cls: m.playing ? 'active' : '', badge: m.playing ? 'Playing' : 'Paused',
                         badgeCls: m.playing ? 'playing' : '',
-                        cover: m.coverart, title: m.title, artist: m.artist, year: m.year
+                        cover: m.coverart, title: m.title, artist: m.artist, year: m.year, album: m.album, genre: m.genre
                     });
                 });
 
                 if (data.config.mic_enabled) {
                     html += card({
-                        name: data.ambient.name, nameStyle: 'font-size: 0.8rem; color:#818cf8',
+                        name: data.ambient.name, nameStyle: 'color:#818cf8; opacity:1',
                         cls: 'active', style: 'border-color: #818cf8;', badge: 'Mic Active', badgeCls: 'playing',
                         cover: data.ambient.coverart, title: data.ambient.title, artist: data.ambient.artist,
-                        year: data.ambient.year
+                        year: data.ambient.year, album: data.ambient.album, genre: data.ambient.genre
                     });
                 }
                 container.innerHTML = html;
+                fitCards(container);
             } catch(e) { console.error(e); }
         }
+
+        // Shrink text per card until everything fits and the cover keeps a sensible size
+        function fitCards(container) {
+            const focus = container.classList.contains('focus');
+            container.querySelectorAll('.card').forEach(card => {
+                const info = card.querySelector('.info');
+                const img = card.querySelector('img');
+                let fit = 1;
+                const ok = () => {
+                    if (card.scrollHeight > card.clientHeight + 1) return false;
+                    if (info.scrollHeight > info.clientHeight + 1 && focus) return false;
+                    // In grid mode keep the cover at least 35% of the card height
+                    return focus || img.clientHeight >= card.clientHeight * 0.35;
+                };
+                while (!ok() && fit > 0.45) {
+                    fit -= 0.05;
+                    info.style.setProperty('--fit', fit.toFixed(2));
+                }
+            });
+        }
+        window.addEventListener('resize', () => fitCards(document.getElementById('container')));
         setInterval(update, 3000);
         update();
     </script>
