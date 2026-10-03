@@ -258,11 +258,10 @@ def _moode_rel(url):
         return url
     return unquote(url).lstrip("/")
 
-def moode_art_proxy_url(instance_id, rel):
-    """Serve moOde images through this server so the browser never needs to reach the player."""
+def _moode_abs(host, rel):
     if rel.startswith(("http://", "https://")):
         return rel
-    return f"/api/moode-art?player={quote(instance_id, safe='')}&p={quote(rel, safe='')}"
+    return f"http://{host}/{quote(rel, safe='/')}"
 
 def _moode_debug(host, message):
     """Print only when the message changes, so the log isn't flooded every poll."""
@@ -366,7 +365,7 @@ def check_moode(instance):
             is_radio = str(song.get("file", "")).startswith("http")
             station = song.get("name", "") if is_radio else ""
             rel = fetch_moode_art(instance["host"], station)
-            art = moode_art_proxy_url(instance["id"], rel) if rel else info["art"]
+            art = _moode_abs(instance["host"], rel) if rel else info["art"]
         else:
             info = {"art": "/static/idle.png", "year": "", "album": "", "genre": ""}
             art = info["art"]
@@ -661,31 +660,6 @@ async def api_history_export(request: Request):
         content=data, media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="nowplaying_history.csv"'},
     )
-
-ART_ALLOWED_PREFIXES = ("imagesw/", "images/", "coverart.php", "artwork/")
-
-@app.get("/api/moode-art")
-async def moode_art(player: str, p: str):
-    """Fetch an image from a configured moOde player and pass it on (restricted paths only)."""
-    inst = next((i for i in load_config().get("moodes", []) if i.get("id") == player), None)
-    path = unquote(p).lstrip("/")
-    if not inst or ".." in path or "://" in path or not path.startswith(ART_ALLOWED_PREFIXES):
-        return Response(status_code=404)
-
-    def fetch():
-        r = requests.get(f"http://{inst['host']}/{quote(path, safe='/')}", timeout=4)
-        ctype = r.headers.get("content-type", "")
-        if r.status_code != 200 or not ctype.startswith("image") or len(r.content) > 5_000_000:
-            print(f"[moOde {inst['host']}] art proxy failed: {r.status_code} {ctype} {path!r}")
-            return None
-        return Response(content=r.content, media_type=ctype,
-                        headers={"Cache-Control": "public, max-age=600"})
-
-    try:
-        return await asyncio.to_thread(fetch) or Response(status_code=404)
-    except Exception as e:
-        print(f"[moOde {inst['host']}] art proxy error: {e}")
-        return Response(status_code=502)
 
 @app.get("/api/dashboard")
 async def get_dashboard():
