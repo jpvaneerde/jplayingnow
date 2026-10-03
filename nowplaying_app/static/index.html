@@ -44,38 +44,58 @@
     </header>
     <div id="container" class="{{ config.display_mode }}"></div>
     <script>
+        const THEMES = ['dark', 'light', 'retro'];
+        const MODES = ['grid', 'focus'];
+
+        function esc(value) {
+            return String(value ?? '').replace(/[&<>"']/g, c => (
+                { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+            ));
+        }
+
+        // Only allow local paths or http(s) URLs for images
+        function safeUrl(url) {
+            const u = String(url ?? '');
+            return (u.startsWith('/') && !u.startsWith('//')) || /^https?:\/\//i.test(u) ? esc(u) : '/static/default_cover.png';
+        }
+
+        function card({ name, nameStyle, cls, style, badge, badgeCls, cover, title, artist }) {
+            return `
+                <div class="card ${cls}" ${style ? `style="${style}"` : ''}>
+                    <span class="badge ${badgeCls}">${esc(badge)}</span>
+                    <div style="${nameStyle}">${esc(name)}</div>
+                    <img src="${safeUrl(cover)}">
+                    <div class="title">${esc(title)}</div>
+                    <div class="artist">${esc(artist)}</div>
+                </div>`;
+        }
+
         async function update() {
             try {
                 const res = await fetch('/api/dashboard');
                 const data = await res.json();
-                document.body.className = data.config.theme;
+                document.body.className = THEMES.includes(data.config.theme) ? data.config.theme : 'dark';
                 const container = document.getElementById('container');
-                container.className = data.config.display_mode;
-                container.innerHTML = '';
+                container.className = MODES.includes(data.config.display_mode) ? data.config.display_mode : 'grid';
 
+                let html = '';
                 data.moodes.forEach(m => {
-                    container.innerHTML += `
-                        <div class="card ${m.playing ? 'active' : ''}">
-                            <span class="badge ${m.playing ? 'playing' : ''}">${m.playing ? 'Playing' : 'Paused'}</span>
-                            <div style="font-size: 0.8rem; opacity:0.6">${m.name}</div>
-                            <img src="${m.coverart}">
-                            <div class="title">${m.title}</div>
-                            <div class="artist">${m.artist}</div>
-                        </div>
-                    `;
+                    html += card({
+                        name: m.name, nameStyle: 'font-size: 0.8rem; opacity:0.6',
+                        cls: m.playing ? 'active' : '', badge: m.playing ? 'Playing' : 'Paused',
+                        badgeCls: m.playing ? 'playing' : '',
+                        cover: m.coverart, title: m.title, artist: m.artist
+                    });
                 });
 
                 if (data.config.mic_enabled) {
-                    container.innerHTML += `
-                        <div class="card active" style="border-color: #818cf8;">
-                            <span class="badge playing">Mic Active</span>
-                            <div style="font-size: 0.8rem; color:#818cf8">${data.ambient.name}</div>
-                            <img src="${data.ambient.coverart}">
-                            <div class="title">${data.ambient.title}</div>
-                            <div class="artist">${data.ambient.artist}</div>
-                        </div>
-                    `;
+                    html += card({
+                        name: data.ambient.name, nameStyle: 'font-size: 0.8rem; color:#818cf8',
+                        cls: 'active', style: 'border-color: #818cf8;', badge: 'Mic Active', badgeCls: 'playing',
+                        cover: data.ambient.coverart, title: data.ambient.title, artist: data.ambient.artist
+                    });
                 }
+                container.innerHTML = html;
             } catch(e) { console.error(e); }
         }
         setInterval(update, 3000);

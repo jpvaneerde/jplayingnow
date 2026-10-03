@@ -48,12 +48,26 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-templates = Jinja2Templates(directory="static")
-os.makedirs("static", exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+
+os.makedirs(STATIC_DIR, exist_ok=True)
+templates = Jinja2Templates(directory=STATIC_DIR)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 shazam = Shazam()
-CONFIG_FILE = "config.json"
+
+DEFAULT_CONFIG = {
+    "theme": "dark",
+    "display_mode": "grid",
+    "screen_rotation": "normal",
+    "mic_enabled": True,
+    "mic_interval_seconds": 8,
+    "input_device_index": 1,
+    "sample_rate": 16000,
+    "moodes": []
+}
 
 def is_service_active(service_name):
     try:
@@ -80,21 +94,33 @@ def set_screen_rotation(rotation: str):
         print(f"Failed to set screen rotation: {e}")
 
 def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        return {
-            "theme": "dark",
-            "display_mode": "grid",
-            "screen_rotation": "normal",
-            "mic_enabled": True,
-            "mic_interval_seconds": 8,
-            "moodes": []
-        }
-    with open(CONFIG_FILE, "r") as f:
-        return json.load(f)
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            cfg.update(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return cfg
 
 def save_config(config_data):
-    with open(CONFIG_FILE, "w") as f:
+    # Atomic write: temp file in same dir, then replace
+    tmp_path = CONFIG_FILE + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(config_data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, CONFIG_FILE)
+
+def to_int(value, default, minimum=None, maximum=None):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None:
+        n = max(minimum, n)
+    if maximum is not None:
+        n = min(maximum, n)
+    return n
 
 latest_ambient_state = {
     "name": "Ambient Listener (CD)",
@@ -107,8 +133,11 @@ def fetch_online_coverart(artist, title):
     if not title or title in ["Idle", "Unknown Track", "Offline"]:
         return "/static/default_cover.png"
     try:
-        query = f"{artist} {title}"
-        res = requests.get(f"https://itunes.apple.com/search?term={query}&limit=1", timeout=2).json()
+        res = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": f"{artist} {title}".strip(), "limit": 1},
+            timeout=2,
+        ).json()
         if res.get("resultCount", 0) > 0:
             return res["results"][0]["artworkUrl100"].replace("100x100bb", "600x600bb")
     except Exception:
@@ -161,10 +190,13 @@ def check_moode(instance):
 #    return wav_io.getvalue()
 
 def record_audio(duration):
-    MIC_DEVICE = 1
+    cfg = load_config()
+    MIC_DEVICE = to_int(cfg.get("input_device_index"), 1)
 
-    # Try standard webcam rates in order of preference
-    for sample_rate in [16000, 48000, 44100]:
+    # Configured rate first, then standard webcam rates as fallbacks
+    rates = [to_int(cfg.get("sample_rate"), 16000)]
+    rates += [r for r in (16000, 48000, 44100) if r not in rates]
+    for sample_rate in rates:
         devnull = os.open(os.devnull, os.O_WRONLY)
         old_stderr = os.dup(2)
         os.dup2(devnull, 2)
@@ -282,21 +314,27 @@ async def save_settings(request: Request):
     cfg["display_mode"] = form.get("display_mode", "grid")
     cfg["screen_rotation"] = form.get("screen_rotation", "normal")
     cfg["mic_enabled"] = form.get("mic_enabled") == "on"
-    cfg["mic_interval_seconds"] = int(form.get("mic_interval_seconds", 8))
+    cfg["mic_interval_seconds"] = to_int(
+        form.get("mic_interval_seconds"), 8, minimum=3, maximum=60
+    )
 
     names = form.getlist("moode_name")
     hosts = form.getlist("moode_host")
     ports = form.getlist("moode_port")
 
     updated_moodes = []
-    for i in range(len(hosts)):
-        if hosts[i].strip():
-            updated_moodes.append({
-                "id": f"moode_{i+1}",
-                "name": names[i].strip() or f"moOde {i+1}",
-                "host": hosts[i].strip(),
-                "port": int(ports[i]) if ports[i].isdigit() else 6600
-            })
+    for i, host in enumerate(hosts):
+        host = host.strip()
+        if not host:
+            continue
+        name = names[i].strip() if i < len(names) else ""
+        port = to_int(ports[i] if i < len(ports) else None, 6600, minimum=1, maximum=65535)
+        updated_moodes.append({
+            "id": f"moode_{len(updated_moodes)+1}",
+            "name": name or f"moOde {len(updated_moodes)+1}",
+            "host": host,
+            "port": port
+        })
 
     cfg["moodes"] = updated_moodes
     save_config(cfg)
