@@ -43,6 +43,15 @@ def init_db(path):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plays_genre ON plays(genre)")
 
 
+def rename_source(old, new):
+    """Relabel existing plays after a source has been renamed."""
+    if old == new:
+        return
+    with _lock, _connect() as conn:
+        conn.execute("UPDATE plays SET source = ? WHERE source = ?", (new, old))
+    _last_logged.clear()
+
+
 def purge_other_sources(keep):
     """Delete plays from any source other than `keep` (e.g. old moOde entries)."""
     with _lock, _connect() as conn:

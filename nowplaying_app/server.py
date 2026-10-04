@@ -45,6 +45,8 @@ os.close(devnull)
 async def lifespan(app: FastAPI):
     # --- Startup Logic ---
     history.init_db(HISTORY_DB)
+    # Keep existing history under the renamed source, then drop anything that isn't the mic
+    history.rename_source("Ambient Listener (CD)", MIC_SOURCE_NAME)
     history.purge_other_sources(MIC_SOURCE_NAME)   # history holds mic-detected songs only
     tasks = [
         asyncio.create_task(background_mic_listener()),
@@ -167,7 +169,7 @@ def to_int(value, default, minimum=None, maximum=None):
     return n
 
 latest_ambient_state = {
-    "name": "Ambient Listener (CD)",
+    "name": "Ambient Listener",
     "title": "Listening...",
     "artist": "Waiting for audio",
     "coverart": "/static/quiet.jpg"
@@ -335,34 +337,6 @@ def fetch_moode_art(host, station="", is_radio=False):
                 return logo, note + f" | logo found via station name {name!r}"
     return "", note + " | no usable cover or station logo"
 
-SR_STREAM_RE = re.compile(r"sverigesradio\.se/topsy/direkt/(\d+)", re.I)
-_sr_cache = {}   # key -> (data, expiry)
-
-def _sr_get(url, ttl):
-    hit = _sr_cache.get(url)
-    if hit and hit[1] > time.time():
-        return hit[0]
-    data = {}
-    try:
-        data = requests.get(url, timeout=3).json()
-    except Exception as e:
-        print(f"Sveriges Radio API error: {e}")
-    _sr_cache[url] = (data, time.time() + ttl)
-    return data
-
-def fetch_sr_info(channel_id):
-    """Station name, logo and current song for a Sveriges Radio channel (open API, no key)."""
-    ch = _sr_get(f"https://api.sr.se/api/v2/channels/{channel_id}?format=json", 3600).get("channel", {})
-    now = _sr_get(f"https://api.sr.se/api/v2/playlists/rightnow?channelid={channel_id}&format=json", 20)
-    song = now.get("playlist", {}).get("song", {}) or {}
-    return {
-        "station": ch.get("name", ""),
-        "image": ch.get("image") or ch.get("imagetemplate") or "",
-        "title": song.get("title", ""),
-        "artist": song.get("artist") or song.get("composer") or "",
-        "album": song.get("albumname", ""),
-    }
-
 def check_moode(instance):
     try:
         client = MPDClient()
@@ -376,17 +350,7 @@ def check_moode(instance):
         title = song.get("title", song.get("name", "Idle" if not is_playing else "Live Stream"))
         artist = song.get("artist", "")
         art_debug = ""
-        sr_match = SR_STREAM_RE.search(str(song.get("file", ""))) if is_playing else None
-        if sr_match:
-            # Sveriges Radio stream: use the SR open API for station logo and current song
-            sr = fetch_sr_info(sr_match.group(1))
-            if not song.get("title"):               # stream sends no metadata of its own
-                title = sr["title"] or sr["station"] or title
-                artist = sr["artist"] or (sr["station"] if sr["title"] else "")
-            info = {"art": sr["image"] or "/static/default_cover.png", "year": "",
-                    "album": sr["album"], "genre": ""}
-            art = info["art"]
-        elif is_playing:
+        if is_playing:
             info = fetch_online_info(artist, title)
             # moOde's own cover (local art, embedded art, radio logos) beats an iTunes guess
             is_radio = str(song.get("file", "")).startswith("http")
@@ -492,7 +456,7 @@ async def background_moode_poller():
         await asyncio.sleep(3)
 
 MIN_PLAY_SECONDS = 20          # a song must be heard this long before it enters history
-MIC_SOURCE_NAME = "Ambient Listener (CD)"
+MIC_SOURCE_NAME = "Ambient Listener"
 pending_play = {"key": None, "first": None, "last": None, "logged": False, "heard": None}
 QUIET_AFTER_SECONDS = 45       # no song recognised for this long -> show the "quiet" card
 
@@ -539,7 +503,7 @@ async def background_mic_listener():
                     year = year or info["year"]
                     latest_ambient_state = {
                         "identified": True,
-                        "name": "Ambient Listener (CD)",
+                        "name": MIC_SOURCE_NAME,
                         "title": track.get("title", "Unknown Title"),
                         "artist": track.get("subtitle", "Unknown Artist"),
                         "year": year,
