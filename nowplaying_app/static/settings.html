@@ -77,6 +77,10 @@
         <div class="card">
             <h3>moOde Players</h3>
             <p style="font-size: 0.85rem; color: #9ca3af; margin-top: 0;">Tick a player to show it on the display.</p>
+            <label class="checkbox-label" style="margin-bottom: 12px;">
+                <input type="checkbox" name="hide_inactive_moodes" {% if config.hide_inactive_moodes %}checked{% endif %}>
+                Automatically hide players that are paused, stopped or offline (show again when playing)
+            </label>
             <div id="moode-list">
                 {% for m in config.moodes %}
                 <div class="row">

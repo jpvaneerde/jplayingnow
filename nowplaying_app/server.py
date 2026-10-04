@@ -82,6 +82,7 @@ DEFAULT_CONFIG = {
     "mic_interval_seconds": 8,
     "input_device_index": 1,
     "sample_rate": 16000,
+    "hide_inactive_moodes": False,
     "moodes": []
 }
 
@@ -626,6 +627,7 @@ async def save_settings(request: Request):
     hosts = form.getlist("moode_host")
     ports = form.getlist("moode_port")
     enabled_rows = set(form.getlist("moode_enabled"))  # row indexes that are ticked
+    cfg["hide_inactive_moodes"] = form.get("hide_inactive_moodes") == "on"
 
     updated_moodes = []
     for i, host in enumerate(hosts):
@@ -717,6 +719,9 @@ async def get_dashboard():
         for i in cfg.get("moodes", [])
         if i.get("enabled", True) and i["id"] in moode_state
     ]
+    if cfg.get("hide_inactive_moodes"):
+        # Show a player only while it is actually playing (hides paused/stopped/offline ones)
+        moode_data = [m for m in moode_data if m.get("playing")]
 
     return {
         "config": cfg,
