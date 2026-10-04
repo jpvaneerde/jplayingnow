@@ -169,7 +169,7 @@ latest_ambient_state = {
     "name": "Ambient Listener (CD)",
     "title": "Listening...",
     "artist": "Waiting for audio",
-    "coverart": "/static/idle.png"
+    "coverart": "/static/quiet.jpg"
 }
 
 _itunes_cache = {}
@@ -484,10 +484,22 @@ async def background_moode_poller():
 
 MIN_PLAY_SECONDS = 20          # a song must be heard this long before it enters history
 MIC_SOURCE_NAME = "Ambient Listener (CD)"
-pending_play = {"key": None, "first": None, "last": None, "logged": False}
+pending_play = {"key": None, "first": None, "last": None, "logged": False, "heard": None}
+QUIET_AFTER_SECONDS = 45       # no song recognised for this long -> show the "quiet" card
+
+def quiet_state():
+    return {
+        "identified": False,
+        "name": MIC_SOURCE_NAME,
+        "title": "No music detected",
+        "artist": "Waiting for something to play",
+        "year": "", "album": "", "genre": "",
+        "coverart": "/static/quiet.jpg",
+    }
 
 async def background_mic_listener():
     global latest_ambient_state
+    listener_started = time.time()
     while True:
         cfg = load_config()
         if cfg.get("mic_enabled", True):
@@ -529,6 +541,7 @@ async def background_mic_listener():
                     # Only log once the same song has been heard for MIN_PLAY_SECONDS
                     s = latest_ambient_state
                     now = time.time()
+                    pending_play["heard"] = now
                     key = (s["title"].lower(), s["artist"].lower())
                     if pending_play["key"] != key:
                         pending_play.update(key=key, first=now - duration, last=now, logged=False)
@@ -544,13 +557,19 @@ async def background_mic_listener():
                             )
                         )
                 else:
-                    # Forget the candidate if the song has been gone for a while
-                    if pending_play["last"] and time.time() - pending_play["last"] > 40:
+                    now = time.time()
+                    # Forget the history candidate if the song has been gone for a while
+                    if pending_play["last"] and now - pending_play["last"] > 40:
                         pending_play.update(key=None, first=None, last=None, logged=False)
-                    # Keep showing the last identified song if a later sample finds nothing
-                    if not latest_ambient_state.get("identified"):
-                        latest_ambient_state["title"] = "No Song Identified"
-                        latest_ambient_state["artist"] = "Listening..."
+                    quiet_after = to_int(cfg.get("quiet_after_seconds"), QUIET_AFTER_SECONDS, minimum=10)
+                    silent_for = now - (pending_play["heard"] or listener_started)
+                    if silent_for > quiet_after:
+                        # Nothing recognised for a while: stop showing the last song
+                        latest_ambient_state = quiet_state()
+                        pending_play.update(key=None, first=None, last=None, logged=False)
+                    elif not latest_ambient_state.get("identified"):
+                        latest_ambient_state["title"] = "Listening..."
+                        latest_ambient_state["artist"] = "Waiting for audio"
             except Exception as e:
                 latest_ambient_state["title"] = "Mic Error"
                 latest_ambient_state["artist"] = str(e)
