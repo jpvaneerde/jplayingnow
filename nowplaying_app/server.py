@@ -299,23 +299,31 @@ def fetch_moode_art(host, station="", is_radio=False):
     url = ""
     album = ""
     notes = []
-    # engine-mpd.php?cmd=status is confirmed to return coverurl on this setup
-    for endpoint in ("engine-mpd.php?cmd=status", "command/?cmd=get_currentsong"):
+    # moOde placeholders are all named default-*.jpg/png/svg (default-radio-cover.jpg, ...)
+    def usable(u):
+        return bool(u) and not unquote(u).rsplit("/", 1)[-1].lower().startswith("default")
+
+    # get_currentsong is the endpoint that returns the real radio logo (it needs
+    # moOde's "Metadata file" option ON); engine-mpd.php is only a fallback because
+    # it can report the generic radio placeholder for the same stream.
+    for endpoint in ("command/?cmd=get_currentsong", "engine-mpd.php?cmd=status"):
         try:
             data = requests.get(f"http://{host}/{endpoint}", timeout=6).json()
-            url = (data.get("coverurl") or "").strip()
-            album = str(data.get("album") or "")
+            found = (data.get("coverurl") or "").strip()
+            album = album or str(data.get("album") or "")
             notes.append(
-                f"{endpoint} @ {host}: coverurl={url!r} album={album!r} "
+                f"{endpoint} @ {host}: coverurl={found!r} album={data.get('album')!r} "
                 f"state={data.get('state')!r} file={data.get('file')!r}"
             )
-            break
+            url = url or found
+            if usable(found):
+                url = found
+                break
         except Exception as e:
             notes.append(f"{endpoint} @ {host} failed: {type(e).__name__}: {e}")
     note = " | ".join(notes)
     _moode_debug(host, note)
-    # moOde placeholders are all named default-*.jpg/png/svg (default-radio-cover.jpg, ...)
-    if url and not unquote(url).rsplit("/", 1)[-1].lower().startswith("default"):
+    if usable(url):
         return _moode_rel(url), note
     # No real cover: for radio, moOde stores logos as radio-logos/<station name>.jpg.
     # The station name is MPD's "name" tag or moOde's "album" field (unless "Unknown station").
