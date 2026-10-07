@@ -36,6 +36,16 @@
                 <option value="inverted" {% if config.screen_rotation == 'inverted' %}selected{% endif %}>Rotate 180° (Upside Down)</option>
                 <option value="left" {% if config.screen_rotation == 'left' %}selected{% endif %}>Rotate 270° Counter-Clockwise</option>
             </select>
+            <label style="margin-top: 15px;">Turn the screen off after no music is detected for (minutes, 0 = never)</label>
+            <input type="number" name="screen_off_minutes" min="0" max="1440" value="{{ config.screen_off_minutes }}">
+            <label class="checkbox-label" style="margin-top: 10px;">
+                <input type="checkbox" name="screen_wake_on_song" {% if config.screen_wake_on_song %}checked{% endif %}>
+                Turn the screen on automatically when the Ambient Listener detects a song
+            </label>
+            <p style="font-size: 0.8rem; color: #9ca3af; margin: 6px 0 0;">
+                Applies only while the local display (Kiosk Mode) is active and the microphone is enabled.
+                Touching the screen or pressing a key wakes it and restarts the countdown.
+            </p>
             <hr style="border: 0; border-top: 1px solid #374151; margin: 20px 0;">
             {% if is_local %}
             <label class="checkbox-label">

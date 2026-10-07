@@ -51,6 +51,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(background_mic_listener()),
         asyncio.create_task(background_moode_poller()),
+        asyncio.create_task(background_screen_manager()),
     ]
     cfg = load_config()
     set_screen_rotation(cfg.get("screen_rotation", "normal"))
@@ -85,6 +86,8 @@ DEFAULT_CONFIG = {
     "input_device_index": 1,
     "sample_rate": 16000,
     "hide_inactive_moodes": False,
+    "screen_off_minutes": 0,          # 0 = never turn the local screen off
+    "screen_wake_on_song": True,      # turn the screen back on when the ambient listener hears a song
     "moodes": []
 }
 
@@ -552,6 +555,81 @@ async def background_mic_listener():
             latest_ambient_state["artist"] = "Disabled in settings"
             await asyncio.sleep(5)
 
+def _xset(*args):
+    env = os.environ.copy()
+    env["DISPLAY"] = ":0"
+    return subprocess.run(["xset", *args], env=env, capture_output=True, text=True, timeout=5)
+
+def get_screen_power():
+    """True if the monitor is on, False if off/standby, None if it can't be determined."""
+    try:
+        m = re.search(r"Monitor is (On|Off|Standby|Suspend)", _xset("q").stdout)
+        if m:
+            return m.group(1) == "On"
+    except Exception:
+        pass
+    return None
+
+def set_screen_power(on):
+    """Turn the local display on or off via DPMS. Returns True if the commands ran."""
+    try:
+        if on:
+            _xset("dpms", "force", "on")
+            _xset("s", "reset")
+        else:
+            _xset("+dpms")
+            _xset("dpms", "force", "off")
+        return True
+    except Exception as e:
+        print(f"Failed to switch screen {'on' if on else 'off'}: {e}")
+        return False
+
+async def background_screen_manager():
+    """Turn the local screen off after N quiet minutes and back on when a song is heard."""
+    loop = asyncio.get_running_loop()
+    started = time.time()
+    screen_on = True
+    off_at = 0.0
+    idle_since = started          # restarted whenever someone wakes the screen by hand
+    kiosk_active, kiosk_checked = False, 0.0
+    while True:
+        await asyncio.sleep(5)
+        try:
+            cfg = load_config()
+            now = time.time()
+            if now - kiosk_checked > 30:
+                kiosk_active = await loop.run_in_executor(None, is_service_active, "kiosk")
+                kiosk_checked = now
+
+            # Only manage the screen while the local display is in use and the mic is listening;
+            # make sure we never leave it switched off otherwise.
+            if not (kiosk_active and cfg.get("mic_enabled", True)):
+                if not screen_on and await loop.run_in_executor(None, set_screen_power, True):
+                    screen_on, idle_since = True, now
+                continue
+
+            minutes = to_int(cfg.get("screen_off_minutes"), 0, minimum=0, maximum=1440)
+            heard = pending_play["heard"] or started   # last time the ambient listener heard a song
+
+            # Notice if the screen was switched by hand (touch/keyboard wakes it)
+            actual = await loop.run_in_executor(None, get_screen_power)
+            if actual is not None and actual != screen_on:
+                screen_on = actual
+                if actual:
+                    idle_since = now      # fresh countdown after a manual wake
+
+            if screen_on:
+                if minutes > 0 and now - max(heard, idle_since) > minutes * 60:
+                    if await loop.run_in_executor(None, set_screen_power, False):
+                        screen_on, off_at = False, now
+            else:
+                heard_new_song = heard > off_at
+                if minutes == 0 or (cfg.get("screen_wake_on_song", True) and heard_new_song):
+                    if await loop.run_in_executor(None, set_screen_power, True):
+                        screen_on, idle_since = True, now
+        except Exception as e:
+            print(f"Screen manager error: {e}")
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     cfg = load_config()
@@ -592,6 +670,8 @@ async def save_settings(request: Request):
     ports = form.getlist("moode_port")
     enabled_rows = set(form.getlist("moode_enabled"))  # row indexes that are ticked
     cfg["hide_inactive_moodes"] = form.get("hide_inactive_moodes") == "on"
+    cfg["screen_off_minutes"] = to_int(form.get("screen_off_minutes"), 0, minimum=0, maximum=1440)
+    cfg["screen_wake_on_song"] = form.get("screen_wake_on_song") == "on"
 
     updated_moodes = []
     for i, host in enumerate(hosts):
