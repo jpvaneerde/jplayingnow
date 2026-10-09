@@ -77,6 +77,8 @@
 
         .title { font-size: 1.1em; font-weight: bold; margin: 0.4em 0 0.15em; }
         .artist { font-size: 0.9em; opacity: 0.7; margin: 0; }
+        /* The artist name itself matches the song title (album/genre lines stay small) */
+        .artist.main { font-size: 1.1em; font-weight: bold; opacity: 1; margin-bottom: 0.15em; }
         .title, .artist { overflow-wrap: anywhere; }
         /* Text is never cut off: JS shrinks .info font-size (--fit) until it fits */
         .info { font-size: calc(1em * var(--fit, 1)); }
@@ -128,7 +130,7 @@
                     <div class="info">
                         <div class="name" style="${nameStyle}">${esc(name)}</div>
                         <div class="title">${esc(title)}</div>
-                        <div class="artist">${esc(artist)}</div>
+                        <div class="artist main">${esc(artist)}</div>
                         ${album ? `<div class="artist">${esc(album)}</div>` : ''}
                         ${(genre || year) ? `<div class="artist">${esc([genre, year].filter(Boolean).join(' · '))}</div>` : ''}
                     </div>
