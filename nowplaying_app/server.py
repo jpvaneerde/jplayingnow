@@ -834,6 +834,19 @@ async def shutdown_system(request: Request):
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/moode/{moode_id}", response_class=HTMLResponse)
+async def moode_page(request: Request, moode_id: str):
+    """Full-screen moOde web UI for one player, with a bar to get back to the dashboard."""
+    cfg = load_config()
+    player = next((m for m in cfg.get("moodes", []) if m.get("id") == moode_id), None)
+    if not player:
+        return RedirectResponse(url="/", status_code=303)
+    return templates.TemplateResponse(
+        request=request,
+        name="moode.html",
+        context={"config": cfg, "player": player, "moode_url": f"http://{player['host']}/"},
+    )
+
 @app.get("/history", response_class=HTMLResponse)
 async def history_page(request: Request):
     return templates.TemplateResponse(request=request, name="history.html", context={"config": load_config()})

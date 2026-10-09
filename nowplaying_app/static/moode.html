@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ player.name }} · JPlaying Now</title>
+    <style>
+        body.dark { --bar: #0f111a; --fg: #fff; }
+        body.light { --bar: #f3f4f6; --fg: #111827; }
+        body.retro { --bar: #1c1917; --fg: #f59e0b; }
+        html, body { height: 100%; height: 100dvh; margin: 0; }
+        body { display: flex; flex-direction: column; background: var(--bar, #0f111a); color: var(--fg, #fff);
+               font-family: system-ui, sans-serif; overflow: hidden; }
+
+        /* Slim bar above moOde so it never covers moOde's own buttons */
+        .bar { flex: none; display: flex; align-items: center; gap: 12px; padding: 6px 10px; font-size: clamp(13px, 3vmin, 17px); }
+        .back { display: inline-flex; align-items: center; gap: 0.5em; background: #10b981; color: #fff; text-decoration: none;
+                font-weight: 700; padding: 0.45em 0.9em; border-radius: 10px; }
+        .back:active { transform: scale(0.97); }
+        .back svg { height: 1.1em; width: auto; }
+        .player { opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        iframe { flex: 1; width: 100%; border: 0; background: #000; }
+    </style>
+</head>
+<body class="{{ config.theme }}">
+    <div class="bar">
+        <a href="/" class="back" aria-label="Back to JPlaying Now">
+            <svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+                <rect x="2" y="16" width="7" height="14" rx="3.5"/>
+                <rect x="12" y="2" width="7" height="28" rx="3.5"/>
+                <rect x="22" y="9" width="7" height="21" rx="3.5"/>
+            </svg>
+            ‹ JPlaying Now
+        </a>
+        <span class="player">{{ player.name }}</span>
+    </div>
+    <iframe src="{{ moode_url }}" title="{{ player.name }} (moOde)" allow="autoplay; fullscreen"></iframe>
+</body>
+</html>
