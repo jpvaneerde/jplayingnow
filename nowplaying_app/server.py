@@ -454,13 +454,53 @@ def check_moode(instance):
 
 
 
+MIC_DEFAULT = "__default__"   # settings value meaning "the system's default input"
+
+def mic_label(name):
+    """Device name without the ALSA card numbers, e.g. 'USB PnP Sound Device: Audio (hw:2,0)'
+    -> 'USB PnP Sound Device: Audio'. The numbers change when USB devices are re-ordered."""
+    return re.sub(r"\s*\((hw|plughw):\d+,\d+\)\s*$", "", str(name or "")).strip()
+
+def list_input_devices():
+    """Microphones PortAudio can see right now: [{index, name, label, channels, rate}]."""
+    try:
+        return [
+            {"index": i, "name": d["name"], "label": mic_label(d["name"]),
+             "channels": d["max_input_channels"], "rate": int(d.get("default_samplerate") or 0)}
+            for i, d in enumerate(sd.query_devices()) if d.get("max_input_channels", 0) > 0
+        ]
+    except Exception as e:
+        print(f"Could not list audio devices: {e}")
+        return []
+
+def resolve_mic(cfg):
+    """Return (device index or None for the system default, device info or None, note).
+
+    The microphone is stored by name, so it is found again when the device order changes.
+    Older configs only have input_device_index, which is used as-is.
+    """
+    devices = list_input_devices()
+    wanted = str(cfg.get("input_device_name") or "").strip()
+    if wanted == MIC_DEFAULT:
+        return None, None, "system default input"
+    if wanted:
+        for d in devices:
+            if d["name"] == wanted or d["label"] == mic_label(wanted):
+                return d["index"], d, f"'{d['label']}' (device {d['index']})"
+        return None, None, f"'{wanted}' is not connected; using the system default input"
+    idx = to_int(cfg.get("input_device_index"), 1)
+    dev = next((d for d in devices if d["index"] == idx), None)
+    if dev:
+        return idx, dev, f"'{dev['label']}' (device {idx})"
+    return None, None, f"device {idx} is not an input; using the system default input"
+
 def record_audio(duration):
     cfg = load_config()
-    MIC_DEVICE = to_int(cfg.get("input_device_index"), 1)
+    MIC_DEVICE, dev, _ = resolve_mic(cfg)
 
-    # Configured rate first, then standard webcam rates as fallbacks
+    # Configured rate first, then the mic's own rate and standard webcam rates as fallbacks
     rates = [to_int(cfg.get("sample_rate"), 16000)]
-    rates += [r for r in (16000, 48000, 44100) if r not in rates]
+    rates += [r for r in ((dev or {}).get("rate"), 16000, 48000, 44100) if r and r not in rates]
     for sample_rate in rates:
         devnull = os.open(os.devnull, os.O_WRONLY)
         old_stderr = os.dup(2)
@@ -747,11 +787,20 @@ async def settings_page(request: Request):
         "kiosk_active": is_service_active("kiosk"),
         "ssh_active": is_service_active("ssh")
     }
+    mic_index, mic_dev, mic_note = await asyncio.to_thread(resolve_mic, cfg)
+    if str(cfg.get("input_device_name") or "") == MIC_DEFAULT:
+        mic_selected = MIC_DEFAULT
+    elif mic_dev:
+        mic_selected = mic_dev["label"]
+    else:
+        mic_selected = mic_label(cfg.get("input_device_name")) or MIC_DEFAULT
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
         context={
             "config": cfg, "system": system_status, "is_local": is_local_request(request),
+            "mics": await asyncio.to_thread(list_input_devices), "mic_selected": mic_selected,
+            "mic_note": mic_note, "mic_default": MIC_DEFAULT,
             "error": request.query_params.get("error", "")[:1800],
         }
     )
@@ -768,6 +817,14 @@ async def save_settings(request: Request):
     cfg["mic_interval_seconds"] = to_int(
         form.get("mic_interval_seconds"), 8, minimum=3, maximum=60
     )
+    mic_choice = str(form.get("mic_device") or "").strip()
+    if mic_choice:
+        cfg["input_device_name"] = mic_choice
+        if mic_choice != MIC_DEFAULT:
+            # Keep the current index too, for anything still reading the old setting
+            match = next((d for d in list_input_devices() if d["label"] == mic_choice), None)
+            if match:
+                cfg["input_device_index"] = match["index"]
 
     names = form.getlist("moode_name")
     hosts = form.getlist("moode_host")

@@ -85,6 +85,22 @@
                 <input type="checkbox" name="mic_enabled" {% if config.mic_enabled %}checked{% endif %}>
                 Enable Microphone Listener
             </label>
+            <label>Microphone</label>
+            <select name="mic_device">
+                <option value="{{ mic_default }}" {% if mic_selected == mic_default %}selected{% endif %}>System default input</option>
+                {% set ns = namespace(found=(mic_selected == mic_default)) %}
+                {% for m in mics %}
+                <option value="{{ m.label }}" {% if m.label == mic_selected %}selected{% set ns.found = true %}{% endif %}>{{ m.label }} ({{ m.channels }} ch{% if m.rate %}, {{ (m.rate / 1000) | round(1) }} kHz{% endif %})</option>
+                {% endfor %}
+                {% if not ns.found %}
+                <option value="{{ mic_selected }}" selected>{{ mic_selected }} (not connected)</option>
+                {% endif %}
+            </select>
+            <p style="font-size: 0.8rem; color: #9ca3af; margin: 6px 0 0;">
+                Now listening with: {{ mic_note }}.<br>
+                The microphone is remembered by name, so it is found again if USB devices change order.
+                A microphone plugged in after the app started appears here after a restart.
+            </p>
             <label>Microphone Sampling Duration (seconds)</label>
             <input type="number" name="mic_interval_seconds" value="{{ config.mic_interval_seconds }}">
         </div>
