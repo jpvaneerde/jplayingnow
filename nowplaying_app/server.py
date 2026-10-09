@@ -984,6 +984,31 @@ async def moode_page(request: Request, moode_id: str):
         context={"config": cfg, "player": player, "moode_url": moode_url},
     )
 
+@app.get("/manifest.webmanifest")
+async def web_manifest():
+    """Lets phones install JPlaying Now as an app (Add to Home Screen / Install app)."""
+    return JSONResponse({
+        "name": "JPlaying Now",
+        "short_name": "JPlaying Now",
+        "description": "What's playing on the moOde players and the ambient listener",
+        "id": "/",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "any",
+        "background_color": "#0f111a",
+        "theme_color": "#0f111a",
+        "icons": [
+            {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/static/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+    }, media_type="application/manifest+json")
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return RedirectResponse(url="/static/icons/favicon.ico", status_code=301)
+
 @app.get("/history", response_class=HTMLResponse)
 async def history_page(request: Request):
     return templates.TemplateResponse(request=request, name="history.html", context={"config": load_config()})
