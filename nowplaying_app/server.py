@@ -56,11 +56,14 @@ async def lifespan(app: FastAPI):
     ]
     cfg = load_config()
     set_screen_rotation(cfg.get("screen_rotation", "normal"))
+    proxy = await start_moode_proxy()
 
     yield
 
     for t in tasks:
         t.cancel()
+    if proxy:
+        await proxy()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -834,6 +837,79 @@ async def shutdown_system(request: Request):
     except Exception as e:
         return {"error": str(e)}
 
+# --- moOde web UI relay -------------------------------------------------------------
+# moOde keeps its state in a PHP session cookie. Embedded straight from the player's own
+# address that cookie is "third-party" and the browser drops it, leaving moOde blank.
+# So moOde is relayed through this Pi on its own port (same site as the dashboard).
+# Which player it talks to is remembered in the "jpn_moode" cookie.
+MOODE_PROXY_PORT = 5100
+_HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
+                "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+                "x-frame-options"}
+
+def moode_proxy_port(cfg=None):
+    return to_int((cfg or load_config()).get("moode_proxy_port"), MOODE_PROXY_PORT, minimum=1024, maximum=65535)
+
+async def start_moode_proxy():
+    """Start the relay. Returns an async cleanup function, or None if it could not start."""
+    try:
+        from aiohttp import web, ClientSession, ClientTimeout
+    except ImportError:
+        print("[moOde relay] aiohttp is not installed; moOde controls are unavailable")
+        return None
+
+    client = ClientSession(auto_decompress=False,
+                           timeout=ClientTimeout(total=None, sock_connect=5, sock_read=120))
+
+    async def handler(request):
+        if request.path.startswith("/__jpn/select/"):
+            resp = web.Response(status=302, headers={"Location": "/", "Cache-Control": "no-store"})
+            resp.set_cookie("jpn_moode", request.path.rsplit("/", 1)[-1], path="/", samesite="Lax")
+            return resp
+        player_id = request.cookies.get("jpn_moode", "")
+        player = next((m for m in load_config().get("moodes", []) if m.get("id") == player_id), None)
+        if not player:
+            return web.Response(status=404, content_type="text/html",
+                                text="<p style='font-family:sans-serif'>No moOde player selected. "
+                                     "Go back to JPlaying Now and tap a player.</p>")
+        base = f"http://{player['host']}"
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
+        body = await request.read()
+        try:
+            async with client.request(request.method, base + str(request.rel_url), headers=headers,
+                                      data=body or None, allow_redirects=False) as up:
+                data = await up.read()
+                resp = web.Response(status=up.status, reason=up.reason, body=data)
+                for k, v in up.headers.items():
+                    if k.lower() in _HOP_HEADERS:
+                        continue
+                    if k.lower() == "location":
+                        v = v.replace(base, "", 1)        # keep redirects on the relay
+                    resp.headers.add(k, v)
+                return resp
+        except Exception as e:
+            return web.Response(status=502, text=f"moOde '{player.get('name')}' ({player['host']}) "
+                                                 f"is not reachable: {type(e).__name__}: {e}")
+
+    relay = web.Application(client_max_size=64 * 1024 * 1024)
+    relay.router.add_route("*", "/{tail:.*}", handler)
+    runner = web.AppRunner(relay, access_log=None)
+    await runner.setup()
+    port = moode_proxy_port()
+    try:
+        await web.TCPSite(runner, "0.0.0.0", port).start()
+        print(f"[moOde relay] listening on port {port}")
+    except OSError as e:
+        print(f"[moOde relay] could not listen on port {port}: {e}")
+        await runner.cleanup()
+        await client.close()
+        return None
+
+    async def stop():
+        await runner.cleanup()
+        await client.close()
+    return stop
+
 @app.get("/moode/{moode_id}", response_class=HTMLResponse)
 async def moode_page(request: Request, moode_id: str):
     """Full-screen moOde web UI for one player, with a bar to get back to the dashboard."""
@@ -841,10 +917,14 @@ async def moode_page(request: Request, moode_id: str):
     player = next((m for m in cfg.get("moodes", []) if m.get("id") == moode_id), None)
     if not player:
         return RedirectResponse(url="/", status_code=303)
+    host = request.url.hostname or "localhost"
+    if ":" in host:
+        host = f"[{host}]"   # IPv6 literal
+    moode_url = f"http://{host}:{moode_proxy_port(cfg)}/__jpn/select/{quote(moode_id, safe='')}"
     return templates.TemplateResponse(
         request=request,
         name="moode.html",
-        context={"config": cfg, "player": player, "moode_url": f"http://{player['host']}/"},
+        context={"config": cfg, "player": player, "moode_url": moode_url},
     )
 
 @app.get("/history", response_class=HTMLResponse)
