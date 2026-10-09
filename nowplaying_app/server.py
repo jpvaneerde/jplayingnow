@@ -229,7 +229,7 @@ latest_ambient_state = {
     "name": "Ambient Listener",
     "title": "Listening...",
     "artist": "Waiting for audio",
-    "coverart": "/static/idle.png"
+    "coverart": "/static/idle.png?v=2"
 }
 
 _itunes_cache = {}
@@ -524,7 +524,7 @@ def quiet_state():
         "title": "No music detected",
         "artist": "Waiting for something to play",
         "year": "", "album": "", "genre": "",
-        "coverart": "/static/idle.png",
+        "coverart": "/static/idle.png?v=2",
     }
 
 async def background_mic_listener():
