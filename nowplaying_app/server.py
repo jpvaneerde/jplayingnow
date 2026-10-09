@@ -20,6 +20,7 @@ try:
 except Exception:
     pass
 
+import shutil
 import socket
 import subprocess
 import time
@@ -149,11 +150,46 @@ def set_service_state(service_name, enable: bool):
         print(msg)
         return msg
 
+def _session_env():
+    """Environment for talking to the desktop. Returns (env, 'wayland' | 'x11').
+
+    Wayland (labwc/wayfire, the Raspberry Pi OS default) is detected by its socket in
+    /run/user/<uid>; otherwise X11 on display :0 is assumed.
+    """
+    env = os.environ.copy()
+    runtime = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    try:
+        sockets = sorted(n for n in os.listdir(runtime) if re.fullmatch(r"wayland-\d+", n))
+    except OSError:
+        sockets = []
+    if sockets:
+        env["XDG_RUNTIME_DIR"] = runtime
+        env.setdefault("WAYLAND_DISPLAY", sockets[0])
+        return env, "wayland"
+    env["DISPLAY"] = ":0"
+    return env, "x11"
+
+def _run_display_cmd(args, env):
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=8)
+
+def _wayland_outputs(env):
+    """Names of the connected outputs, from `wlr-randr`."""
+    out = _run_display_cmd(["wlr-randr"], env).stdout
+    return re.findall(r"^(\S+)", out, re.M)
+
+# Same labels as the settings page (xrandr names) -> wlr-randr transforms.
+# xrandr "right" turns the picture 90° clockwise, which wlr-randr calls 270.
+_WAYLAND_TRANSFORM = {"normal": "normal", "right": "270", "inverted": "180", "left": "90"}
+
 def set_screen_rotation(rotation: str):
     try:
-        env = os.environ.copy()
-        env["DISPLAY"] = ":0"
-        subprocess.run(["xrandr", "-o", rotation], env=env, check=False)
+        env, kind = _session_env()
+        if kind == "wayland":
+            transform = _WAYLAND_TRANSFORM.get(rotation, "normal")
+            for output in _wayland_outputs(env):
+                _run_display_cmd(["wlr-randr", "--output", output, "--transform", transform], env)
+        else:
+            _run_display_cmd(["xrandr", "-o", rotation], env)
     except Exception as e:
         print(f"Failed to set screen rotation: {e}")
 
@@ -573,15 +609,20 @@ async def background_mic_listener():
             latest_ambient_state["artist"] = "Disabled in settings"
             await asyncio.sleep(5)
 
-def _xset(*args):
-    env = os.environ.copy()
-    env["DISPLAY"] = ":0"
-    return subprocess.run(["xset", *args], env=env, capture_output=True, text=True, timeout=5)
-
 def get_screen_power():
-    """True if the monitor is on, False if off/standby, None if it can't be determined."""
+    """True if the monitor is on, False if off, None if it can't be determined."""
     try:
-        m = re.search(r"Monitor is (On|Off|Standby|Suspend)", _xset("q").stdout)
+        env, kind = _session_env()
+        if kind == "wayland":
+            # `wlopm` (installed on Raspberry Pi OS) prints "<output> on|off" per output
+            if shutil.which("wlopm"):
+                states = re.findall(r"^\S+\s+(on|off)\s*$", _run_display_cmd(["wlopm"], env).stdout, re.M)
+                if states:
+                    return "on" in states
+            # Fallback: outputs reported as "Enabled: yes/no" by wlr-randr
+            states = re.findall(r"Enabled:\s*(yes|no)", _run_display_cmd(["wlr-randr"], env).stdout)
+            return ("yes" in states) if states else None
+        m = re.search(r"Monitor is (On|Off|Standby|Suspend)", _run_display_cmd(["xset", "q"], env).stdout)
         if m:
             return m.group(1) == "On"
     except Exception:
@@ -589,18 +630,37 @@ def get_screen_power():
     return None
 
 def set_screen_power(on):
-    """Turn the local display on or off via DPMS. Returns True if the commands ran."""
+    """Turn the local display on or off. Returns True if the commands ran."""
     try:
+        env, kind = _session_env()
+        if kind == "wayland":
+            if shutil.which("wlopm"):
+                res = _run_display_cmd(["wlopm", "--on" if on else "--off", "*"], env)
+                if res.returncode != 0:
+                    print(f"wlopm failed: {res.stderr.strip()}")
+                return res.returncode == 0
+            for output in _wayland_outputs(env):
+                _run_display_cmd(["wlr-randr", "--output", output, "--on" if on else "--off"], env)
+            return True
         if on:
-            _xset("dpms", "force", "on")
-            _xset("s", "reset")
+            _run_display_cmd(["xset", "dpms", "force", "on"], env)
+            _run_display_cmd(["xset", "s", "reset"], env)
         else:
-            _xset("+dpms")
-            _xset("dpms", "force", "off")
+            _run_display_cmd(["xset", "+dpms"], env)
+            _run_display_cmd(["xset", "dpms", "force", "off"], env)
         return True
     except Exception as e:
         print(f"Failed to switch screen {'on' if on else 'off'}: {e}")
         return False
+
+screen_status = {"manager": "starting"}   # live view of the screen manager, see /api/screen-status
+_screen_log_last = [None]
+
+def _screen_log(message):
+    """Print a screen-manager status line only when it changes."""
+    if _screen_log_last[0] != message:
+        _screen_log_last[0] = message
+        print(f"[screen] {message}")
 
 async def background_screen_manager():
     """Turn the local screen off after N quiet minutes and back on when a song is heard."""
@@ -619,9 +679,20 @@ async def background_screen_manager():
                 kiosk_active = await loop.run_in_executor(None, is_service_active, "kiosk")
                 kiosk_checked = now
 
+            screen_status.update(
+                manager="running", kiosk_active=kiosk_active, mic_enabled=cfg.get("mic_enabled", True),
+                off_after_minutes=to_int(cfg.get("screen_off_minutes"), 0, minimum=0, maximum=1440),
+                wake_on_song=cfg.get("screen_wake_on_song", True),
+                seconds_since_last_song=round(now - (pending_play["heard"] or started)),
+                screen_on_assumed=screen_on,
+            )
             # Only manage the screen while the local display is in use and the mic is listening;
             # make sure we never leave it switched off otherwise.
             if not (kiosk_active and cfg.get("mic_enabled", True)):
+                _screen_log(
+                    f"idle: kiosk_active={kiosk_active} mic={cfg.get('mic_enabled', True)} "
+                    "(screen control only runs while the kiosk service is active and the mic is on)"
+                )
                 if not screen_on and await loop.run_in_executor(None, set_screen_power, True):
                     screen_on, idle_since = True, now
                 continue
@@ -631,6 +702,12 @@ async def background_screen_manager():
 
             # Notice if the screen was switched by hand (touch/keyboard wakes it)
             actual = await loop.run_in_executor(None, get_screen_power)
+            _screen_log(
+                f"kiosk_active={kiosk_active} mic={cfg.get('mic_enabled', True)} off_after={minutes}min "
+                f"screen_on={screen_on} reported_by_system={actual}"
+            )
+            screen_status.update(screen_reported_by_system=actual,
+                                 seconds_idle=round(now - max(heard, idle_since)))
             if actual is not None and actual != screen_on:
                 screen_on = actual
                 if actual:
@@ -638,7 +715,9 @@ async def background_screen_manager():
 
             if screen_on:
                 if minutes > 0 and now - max(heard, idle_since) > minutes * 60:
-                    if await loop.run_in_executor(None, set_screen_power, False):
+                    ok = await loop.run_in_executor(None, set_screen_power, False)
+                    _screen_log(f"turning screen off after {minutes} min without a song: {'ok' if ok else 'FAILED'}")
+                    if ok:
                         screen_on, off_at = False, now
             else:
                 heard_new_song = heard > off_at
@@ -646,6 +725,7 @@ async def background_screen_manager():
                     if await loop.run_in_executor(None, set_screen_power, True):
                         screen_on, idle_since = True, now
         except Exception as e:
+            screen_status["manager"] = f"error: {type(e).__name__}: {e}"
             print(f"Screen manager error: {e}")
 
 @app.get("/", response_class=HTMLResponse)
@@ -785,6 +865,11 @@ async def api_history_export(request: Request):
         content=data, media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="nowplaying_history.csv"'},
     )
+
+@app.get("/api/screen-status")
+async def api_screen_status():
+    """What the screen manager currently sees (for troubleshooting)."""
+    return screen_status
 
 @app.get("/api/dashboard")
 async def get_dashboard():

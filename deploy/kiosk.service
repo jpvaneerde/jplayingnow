@@ -1,8 +1,9 @@
-# Example systemd unit for the local "Kiosk Mode" display (X11 desktop, Chromium).
+# Example systemd unit for the local "Kiosk Mode" display (Chromium on the running desktop).
+# This version is for the Wayland desktop (labwc) that Raspberry Pi OS uses by default.
 #
-# Install on the Pi (replace USER with your login name, e.g. pi):
+# Install on the Pi (replace USER with your login name, e.g. jp):
 #   sudo cp deploy/kiosk.service /etc/systemd/system/kiosk.service
-#   sudo nano /etc/systemd/system/kiosk.service       # set User= and the paths
+#   sudo nano /etc/systemd/system/kiosk.service       # set User=, and the uid (id -u) in XDG_RUNTIME_DIR
 #   sudo systemctl daemon-reload
 #
 # Let the web app switch it on/off without a password. Run `sudo visudo -f /etc/sudoers.d/nowplaying`
@@ -10,20 +11,25 @@
 #   USER ALL=(root) NOPASSWD: /usr/bin/systemctl enable --now kiosk, /usr/bin/systemctl disable --now kiosk, /usr/bin/systemctl enable --now ssh, /usr/bin/systemctl disable --now ssh, /usr/sbin/reboot, /usr/sbin/shutdown
 #
 # Check it works:  sudo systemctl start kiosk && systemctl status kiosk
+#
+# X11 desktop instead of Wayland? Replace the two Wayland Environment= lines with
+#   Environment=DISPLAY=:0
+#   Environment=XAUTHORITY=/home/USER/.Xauthority
+# and remove --ozone-platform=wayland from ExecStart.
 
 [Unit]
-Description=JPlaying Now kiosk display
+Description=Local Chromium Kiosk Display
 After=graphical.target network-online.target
 Wants=graphical.target
 
 [Service]
 User=USER
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/USER/.Xauthority
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WAYLAND_DISPLAY=wayland-0
 # Wait for the web app to answer before opening the browser
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do curl -sf http://localhost:5000/ >/dev/null && exit 0; sleep 1; done; exit 1'
-# On Raspberry Pi OS the browser binary is "chromium-browser" or "chromium" (check with: which chromium chromium-browser)
-ExecStart=/usr/bin/chromium-browser --kiosk --noerrdialogs --disable-infobars --incognito --no-first-run http://localhost:5000
+# The binary is "chromium-browser" or "chromium" (check with: which chromium chromium-browser)
+ExecStart=/usr/bin/chromium-browser --kiosk --ozone-platform=wayland --noerrdialogs --disable-infobars --check-for-update-interval=31536000 http://localhost:5000
 Restart=on-failure
 RestartSec=5
 
