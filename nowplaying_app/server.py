@@ -122,6 +122,15 @@ def is_service_active(service_name):
     except Exception:
         return False
 
+def service_status_text(service_name):
+    """Last lines of `systemctl status` (state, exit code, recent log) for error messages."""
+    try:
+        res = subprocess.run(["systemctl", "status", service_name, "--no-pager", "-n", "12"],
+                             capture_output=True, text=True, timeout=10)
+        return (res.stdout or res.stderr).strip()[-1200:] or "no status available"
+    except Exception as e:
+        return f"could not read status: {e}"
+
 def set_service_state(service_name, enable: bool):
     """Enable/disable a systemd service. Returns '' on success or an error message."""
     action = ["enable", "--now"] if enable else ["disable", "--now"]
@@ -660,7 +669,7 @@ async def settings_page(request: Request):
         name="settings.html",
         context={
             "config": cfg, "system": system_status, "is_local": is_local_request(request),
-            "error": request.query_params.get("error", "")[:500],
+            "error": request.query_params.get("error", "")[:1800],
         }
     )
 
@@ -709,13 +718,19 @@ async def save_settings(request: Request):
     errors = []
     # Only touch a service when its wanted state differs from the current one
     if enable_kiosk != is_service_active("kiosk"):
-        errors.append(await asyncio.to_thread(set_service_state, "kiosk", enable_kiosk))
+        err = await asyncio.to_thread(set_service_state, "kiosk", enable_kiosk)
+        if not err and enable_kiosk:
+            # The command succeeded, but the service may have crashed right after starting
+            await asyncio.sleep(3)
+            if not is_service_active("kiosk"):
+                err = "'kiosk' was enabled but is not running:\n" + await asyncio.to_thread(service_status_text, "kiosk")
+        errors.append(err)
     # SSH can only be changed from the Pi itself; remote requests leave it untouched
     if is_local_request(request) and enable_ssh != is_service_active("ssh"):
         errors.append(await asyncio.to_thread(set_service_state, "ssh", enable_ssh))
     set_screen_rotation(cfg["screen_rotation"])
 
-    error = " | ".join(e for e in errors if e)
+    error = "\n".join(e for e in errors if e)
     url = "/settings" + (f"?error={quote(error)}" if error else "")
     return RedirectResponse(url=url, status_code=303)
 
