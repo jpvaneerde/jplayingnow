@@ -22,6 +22,11 @@
 <body>
     <a href="/">← Back to Display</a> &nbsp; <a href="/history">History</a>
     <h1>System & App Settings</h1>
+    {% if error %}
+    <div class="card" style="border: 1px solid #dc2626; color: #fca5a5; font-size: 0.9rem; word-break: break-word;">
+        {{ error }}
+    </div>
+    {% endif %}
     <form action="/settings/save" method="post">
         <div class="card">
             <h3>System & Screen Options</h3>

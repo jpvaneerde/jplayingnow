@@ -123,13 +123,22 @@ def is_service_active(service_name):
         return False
 
 def set_service_state(service_name, enable: bool):
+    """Enable/disable a systemd service. Returns '' on success or an error message."""
+    action = ["enable", "--now"] if enable else ["disable", "--now"]
     try:
-        if enable:
-            subprocess.run(["sudo", "systemctl", "enable", "--now", service_name], check=True)
-        else:
-            subprocess.run(["sudo", "systemctl", "disable", "--now", service_name], check=True)
+        # -n: never wait for a sudo password (the server has no terminal to type it in)
+        res = subprocess.run(["sudo", "-n", "systemctl", *action, service_name],
+                             capture_output=True, text=True, timeout=30)
+        if res.returncode != 0:
+            detail = (res.stderr or res.stdout).strip() or f"exit code {res.returncode}"
+            msg = f"Could not {action[0]} '{service_name}': {detail}"
+            print(msg)
+            return msg
+        return ""
     except Exception as e:
-        print(f"Failed to set state for {service_name}: {e}")
+        msg = f"Could not {action[0]} '{service_name}': {e}"
+        print(msg)
+        return msg
 
 def set_screen_rotation(rotation: str):
     try:
@@ -649,7 +658,10 @@ async def settings_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
-        context={"config": cfg, "system": system_status, "is_local": is_local_request(request)}
+        context={
+            "config": cfg, "system": system_status, "is_local": is_local_request(request),
+            "error": request.query_params.get("error", "")[:500],
+        }
     )
 
 @app.post("/settings/save")
@@ -694,13 +706,18 @@ async def save_settings(request: Request):
     enable_kiosk = form.get("local_kiosk") == "on"
     enable_ssh = form.get("ssh_enabled") == "on"
 
-    set_service_state("kiosk", enable_kiosk)
+    errors = []
+    # Only touch a service when its wanted state differs from the current one
+    if enable_kiosk != is_service_active("kiosk"):
+        errors.append(await asyncio.to_thread(set_service_state, "kiosk", enable_kiosk))
     # SSH can only be changed from the Pi itself; remote requests leave it untouched
-    if is_local_request(request):
-        set_service_state("ssh", enable_ssh)
+    if is_local_request(request) and enable_ssh != is_service_active("ssh"):
+        errors.append(await asyncio.to_thread(set_service_state, "ssh", enable_ssh))
     set_screen_rotation(cfg["screen_rotation"])
 
-    return RedirectResponse(url="/settings", status_code=303)
+    error = " | ".join(e for e in errors if e)
+    url = "/settings" + (f"?error={quote(error)}" if error else "")
+    return RedirectResponse(url=url, status_code=303)
 
 @app.post("/system/reboot")
 async def reboot_system(request: Request):

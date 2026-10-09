@@ -1,0 +1,31 @@
+# Example systemd unit for the local "Kiosk Mode" display (X11 desktop, Chromium).
+#
+# Install on the Pi (replace USER with your login name, e.g. pi):
+#   sudo cp deploy/kiosk.service /etc/systemd/system/kiosk.service
+#   sudo nano /etc/systemd/system/kiosk.service       # set User= and the paths
+#   sudo systemctl daemon-reload
+#
+# Let the web app switch it on/off without a password. Run `sudo visudo -f /etc/sudoers.d/nowplaying`
+# and add (replace USER with the account that runs server.py):
+#   USER ALL=(root) NOPASSWD: /usr/bin/systemctl enable --now kiosk, /usr/bin/systemctl disable --now kiosk, /usr/bin/systemctl enable --now ssh, /usr/bin/systemctl disable --now ssh, /usr/sbin/reboot, /usr/sbin/shutdown
+#
+# Check it works:  sudo systemctl start kiosk && systemctl status kiosk
+
+[Unit]
+Description=JPlaying Now kiosk display
+After=graphical.target network-online.target
+Wants=graphical.target
+
+[Service]
+User=USER
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/USER/.Xauthority
+# Wait for the web app to answer before opening the browser
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do curl -sf http://localhost:5000/ >/dev/null && exit 0; sleep 1; done; exit 1'
+# On Raspberry Pi OS the browser binary is "chromium-browser" or "chromium" (check with: which chromium chromium-browser)
+ExecStart=/usr/bin/chromium-browser --kiosk --noerrdialogs --disable-infobars --incognito --no-first-run http://localhost:5000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target
