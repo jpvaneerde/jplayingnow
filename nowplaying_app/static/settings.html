@@ -135,6 +135,36 @@
             <button type="button" class="btn btn-add" onclick="addMoodeRow()">+ Add moOde Player</button>
         </div>
 
+        <div class="card">
+            <h3>JPlay Spins</h3>
+            <p style="font-size: 0.85rem; color: #9ca3af; margin-top: 0;">
+                Reports what this room hears and plays to JPlay Records, which keeps one history for all rooms
+                (records you put on, radio and other streams). Create a listener for this unit in JPlay Records →
+                Settings → Listeners and paste its token here.
+            </p>
+            <label class="checkbox-label">
+                <input type="checkbox" name="spins_enabled" {% if config.spins_enabled %}checked{% endif %}>
+                Send plays to JPlay Spins
+            </label>
+            <label>JPlay Records address</label>
+            <input type="text" name="spins_url" value="{{ config.spins_url }}" placeholder="https://records.jplay.cloud">
+            <label>Listener token</label>
+            <input type="password" name="spins_token" value="" autocomplete="off"
+                   placeholder="{{ 'Saved (leave empty to keep it)' if config.spins_token else 'Paste the token' }}">
+            <label>moOde player in this room</label>
+            <select name="spins_room_moode">
+                <option value="" {% if not config.spins_room_moode %}selected{% endif %}>None (no moOde in this room)</option>
+                {% for m in config.moodes %}
+                <option value="{{ m.host }}" {% if config.spins_room_moode == m.host %}selected{% endif %}>{{ m.name }} ({{ m.host }})</option>
+                {% endfor %}
+            </select>
+            <p style="font-size: 0.8rem; color: #9ca3af; margin: 6px 0 0;">
+                While this player is playing, songs the microphone hears count as streamed (radio or files), not as your own records.<br>
+                Status: {{ spins.queued }} waiting to be sent · last sent {{ spins_seen.last_ok }}
+                {% if spins.last_error %}<br><span style="color: #fca5a5;">Last error: {{ spins.last_error }}</span>{% endif %}
+            </p>
+        </div>
+
         <button type="submit" class="btn">Save & Apply Settings</button>
     </form>
 

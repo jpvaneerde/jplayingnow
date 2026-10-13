@@ -29,6 +29,7 @@ from urllib.parse import quote, unquote
 import wave
 import requests
 import sounddevice as sd
+import numpy as np
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -37,6 +38,7 @@ from fastapi.templating import Jinja2Templates
 from shazamio import Shazam
 from mpd import MPDClient
 import history
+import spins
 
 os.dup2(old_stderr, 2)
 os.close(old_stderr)
@@ -49,10 +51,12 @@ async def lifespan(app: FastAPI):
     # Keep existing history under the renamed source, then drop anything that isn't the mic
     history.rename_source("Ambient Listener (CD)", MIC_SOURCE_NAME)
     history.purge_other_sources(MIC_SOURCE_NAME)   # history holds mic-detected songs only
+    spins.init(HISTORY_DB)                          # JPlay Spins outbox lives next to the history
     tasks = [
         asyncio.create_task(background_mic_listener()),
         asyncio.create_task(background_moode_poller()),
         asyncio.create_task(background_screen_manager()),
+        asyncio.create_task(background_spins_sender()),
     ]
     cfg = load_config()
     set_screen_rotation(cfg.get("screen_rotation", "normal"))
@@ -92,6 +96,10 @@ DEFAULT_CONFIG = {
     "hide_inactive_moodes": False,
     "screen_off_minutes": 0,          # 0 = never turn the local screen off
     "screen_wake_on_song": True,      # turn the screen back on when the ambient listener hears a song
+    "spins_enabled": False,           # report plays to JPlay Spins (records.jplay.cloud)
+    "spins_url": "https://records.jplay.cloud",
+    "spins_token": "",                # listener token from JPlay Records → Settings → Listeners
+    "spins_room_moode": "",           # host of the moOde player in this room ("" = none)
     "moodes": []
 }
 
@@ -429,10 +437,19 @@ def check_moode(instance):
         if isinstance(album, list):
             album = album[0]
 
+        is_radio_stream = str(song.get("file", "")).startswith("http")
         return {
             "id": instance["id"],
             "name": instance["name"],
+            "host": instance["host"],
             "playing": is_playing,
+            # Raw MPD state for JPlay Spins (radio often has no track in its metadata)
+            "state": status.get("state", "stop"),
+            "is_radio": is_radio_stream,
+            "station": song.get("name", "") if is_radio_stream else "",
+            "raw_title": song.get("title", ""),
+            "raw_artist": song.get("artist", ""),
+            "raw_album": song.get("album", "") if not isinstance(song.get("album"), list) else song.get("album")[0],
             "title": title,
             "artist": artist,
             "year": year if is_playing else "",
@@ -446,7 +463,9 @@ def check_moode(instance):
         return {
             "id": instance["id"],
             "name": instance["name"],
+            "host": instance.get("host", ""),
             "playing": False,
+            "state": "offline",
             "title": "Offline",
             "artist": "Connection Failed",
             "coverart": "/static/offline.png"
@@ -515,6 +534,9 @@ def record_audio(duration):
                 device=MIC_DEVICE,
             )
             sd.wait()
+            global LAST_LEVEL_DB
+            rms = float(np.sqrt(np.mean(np.square(recording.astype(np.float32))))) if recording.size else 0.0
+            LAST_LEVEL_DB = round(20 * np.log10(rms / 32768 + 1e-9), 1)
 
             # If recording succeeded, compile WAV buffer and break out
             wav_io = io.BytesIO()
@@ -538,6 +560,7 @@ def record_audio(duration):
     )
 
 moode_state = {}
+LAST_LEVEL_DB = None   # loudness of the last microphone clip (dBFS)
 
 async def background_moode_poller():
     """Poll enabled moOde players and cache their state for the display."""
@@ -551,13 +574,27 @@ async def background_moode_poller():
                 *(loop.run_in_executor(None, check_moode, i) for i in instances)
             )
             moode_state = {r["id"]: r for r in results}  # display only; not logged to history
+            room_host = str(cfg.get("spins_room_moode") or "").strip()
+            if spins.enabled(cfg) and room_host:
+                own = next((r for r in results if r.get("host") == room_host), None)
+                if own is None:
+                    # This room's player isn't in the display list (or is disabled): still watch it.
+                    port = next((m.get("port", 6600) for m in cfg.get("moodes", []) if m.get("host") == room_host), 6600)
+                    own = await loop.run_in_executor(None, check_moode, {"id": "spins_room", "name": "room", "host": room_host, "port": port})
+                spins.room_update(own)
         except Exception as e:
             print(f"moOde poller error: {e}")
         await asyncio.sleep(3)
 
 MIN_PLAY_SECONDS = 20          # a song must be heard this long before it enters history
 MIC_SOURCE_NAME = "Ambient Listener"
-pending_play = {"key": None, "first": None, "last": None, "logged": False, "heard": None}
+pending_play = {"key": None, "first": None, "last": None, "logged": False, "heard": None, "spin_id": None}
+
+def _finish_pending():
+    """The current song stopped being heard: tell JPlay Spins when it ended."""
+    if pending_play.get("spin_id"):
+        spins.queue("mic_end", pending_play["last"] or time.time(), {"mic_id": pending_play["spin_id"]})
+    pending_play["spin_id"] = None
 QUIET_AFTER_SECONDS = 45       # no song recognised for this long -> show the "quiet" card
 
 def quiet_state():
@@ -617,11 +654,20 @@ async def background_mic_listener():
                     pending_play["heard"] = now
                     key = (s["title"].lower(), s["artist"].lower())
                     if pending_play["key"] != key:
+                        _finish_pending()
                         pending_play.update(key=key, first=now - duration, last=now, logged=False)
                     else:
                         pending_play["last"] = now
                     if not pending_play["logged"] and now - pending_play["first"] >= MIN_PLAY_SECONDS:
                         pending_play["logged"] = True
+                        if spins.enabled(cfg):
+                            pending_play["spin_id"] = spins.queue("mic", pending_play["first"], {
+                                "title": s["title"], "artist": s["artist"], "album": s["album"],
+                                "genre": s["genre"], "year": s["year"],
+                                "cover": s["coverart"] if str(s["coverart"]).startswith("http") else "",
+                                "shazam_key": track.get("key", ""), "isrc": track.get("isrc", ""),
+                                "level_db": LAST_LEVEL_DB,
+                            })
                         await loop.run_in_executor(
                             None, lambda: history.log_play(
                                 s["name"], s["title"], s["artist"], s["album"], s["genre"],
@@ -633,12 +679,14 @@ async def background_mic_listener():
                     now = time.time()
                     # Forget the history candidate if the song has been gone for a while
                     if pending_play["last"] and now - pending_play["last"] > 40:
+                        _finish_pending()
                         pending_play.update(key=None, first=None, last=None, logged=False)
                     quiet_after = to_int(cfg.get("quiet_after_seconds"), QUIET_AFTER_SECONDS, minimum=10)
                     silent_for = now - (pending_play["heard"] or listener_started)
                     if silent_for > quiet_after:
                         # Nothing recognised for a while: stop showing the last song
                         latest_ambient_state = quiet_state()
+                        _finish_pending()
                         pending_play.update(key=None, first=None, last=None, logged=False)
                     elif not latest_ambient_state.get("identified"):
                         latest_ambient_state["title"] = "Listening..."
@@ -651,6 +699,22 @@ async def background_mic_listener():
             latest_ambient_state["title"] = "Mic Disabled"
             latest_ambient_state["artist"] = "Disabled in settings"
             await asyncio.sleep(5)
+
+async def background_spins_sender():
+    """Send queued Spins events every few seconds (slower while the server can't be reached)."""
+    wait = 5
+    while True:
+        await asyncio.sleep(wait)
+        cfg = load_config()
+        if not spins.enabled(cfg):
+            wait = 10
+            continue
+        try:
+            sent = await asyncio.get_running_loop().run_in_executor(None, spins.send_pending, cfg)
+            wait = 5 if sent or not spins.status["last_error"] else min(wait * 2, 120)
+        except Exception as e:
+            spins.status["last_error"] = str(e)
+            wait = 60
 
 def get_screen_power():
     """True if the monitor is on, False if off, None if it can't be determined."""
@@ -801,6 +865,10 @@ async def settings_page(request: Request):
             "config": cfg, "system": system_status, "is_local": is_local_request(request),
             "mics": await asyncio.to_thread(list_input_devices), "mic_selected": mic_selected,
             "mic_note": mic_note, "mic_default": MIC_DEFAULT,
+            "spins": spins.status, "spins_seen": {
+                k: (datetime.fromtimestamp(v).strftime("%Y-%m-%d %H:%M:%S") if v else "never")
+                for k, v in (("last_ok", spins.status.get("last_ok")), ("last_attempt", spins.status.get("last_attempt")))
+            },
             "error": request.query_params.get("error", "")[:1800],
         }
     )
@@ -850,6 +918,13 @@ async def save_settings(request: Request):
         })
 
     cfg["moodes"] = updated_moodes
+
+    cfg["spins_enabled"] = form.get("spins_enabled") == "on"
+    cfg["spins_url"] = str(form.get("spins_url") or "").strip().rstrip("/") or DEFAULT_CONFIG["spins_url"]
+    new_token = str(form.get("spins_token") or "").strip()
+    if new_token:                      # empty field = keep the saved token
+        cfg["spins_token"] = new_token
+    cfg["spins_room_moode"] = str(form.get("spins_room_moode") or "").strip()
     save_config(cfg)
 
     enable_kiosk = form.get("local_kiosk") == "on"
@@ -1040,6 +1115,11 @@ async def api_history_export(request: Request):
         content=data, media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="nowplaying_history.csv"'},
     )
+
+@app.get("/api/spins-status")
+async def api_spins_status():
+    """JPlay Spins outbox state (for troubleshooting)."""
+    return spins.status
 
 @app.get("/api/screen-status")
 async def api_screen_status():
