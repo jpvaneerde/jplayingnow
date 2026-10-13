@@ -1,0 +1,23 @@
+# systemd unit that runs the JPlaying Now web app (server.py) on port 5000.
+# Written for user "jp" (uid 1000) with the repo in /home/jp/jplayingnow. See README.md → Setup, step 5.
+#
+#   sudo cp ~/jplayingnow/deploy/jplayingnow.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jplayingnow
+
+[Unit]
+Description=JPlaying Now
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=jp
+WorkingDirectory=/home/jp/jplayingnow/nowplaying_app
+# Needed to control the local screen (rotation, on/off) on the Wayland desktop
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/home/jp/jplayingnow/.venv/bin/python server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
