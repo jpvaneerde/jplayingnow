@@ -4,6 +4,7 @@ import json
 import os
 import re
 import ctypes
+import sys
 
 devnull = os.open(os.devnull, os.O_WRONLY)
 old_stderr = os.dup(2)
@@ -20,26 +21,33 @@ try:
 except Exception:
     pass
 
-import shutil
-import socket
-import subprocess
-import time
-from datetime import datetime
-from urllib.parse import quote, unquote
-import wave
-import requests
-import sounddevice as sd
-import numpy as np
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from shazamio import Shazam
-from mpd import MPDClient
-import history
-import spins
-
+try:
+    import shutil
+    import socket
+    import subprocess
+    import time
+    from datetime import datetime
+    from urllib.parse import quote, unquote
+    import wave
+    import requests
+    import sounddevice as sd
+    import numpy as np
+    from contextlib import asynccontextmanager
+    from fastapi import FastAPI, Request
+    from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.templating import Jinja2Templates
+    from shazamio import Shazam
+    from mpd import MPDClient
+    import history
+    import spins
+except Exception:
+    # Imports run with stderr silenced (to hide ALSA noise); show why startup failed instead of exiting silently.
+    os.dup2(old_stderr, 2)
+    import traceback
+    traceback.print_exc()
+    print("\nJPlaying Now could not start: a package or library is missing (see above).", file=sys.stderr)
+    sys.exit(1)
 os.dup2(old_stderr, 2)
 os.close(old_stderr)
 os.close(devnull)
