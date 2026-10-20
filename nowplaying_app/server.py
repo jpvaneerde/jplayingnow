@@ -38,8 +38,8 @@ try:
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
     from shazamio import Shazam
-    from mpd import MPDClient
     import history
+    import players
     import spins
 except Exception:
     # Imports run with stderr silenced (to hide ALSA noise); show why startup failed instead of exiting silently.
@@ -62,20 +62,18 @@ async def lifespan(app: FastAPI):
     spins.init(HISTORY_DB)                          # JPlay Spins outbox lives next to the history
     tasks = [
         asyncio.create_task(background_mic_listener()),
-        asyncio.create_task(background_moode_poller()),
+        asyncio.create_task(background_player_poller()),
+        asyncio.create_task(background_radio_listener()),
         asyncio.create_task(background_screen_manager()),
         asyncio.create_task(background_spins_sender()),
     ]
     cfg = load_config()
     set_screen_rotation(cfg.get("screen_rotation", "normal"))
-    proxy = await start_moode_proxy()
 
     yield
 
     for t in tasks:
         t.cancel()
-    if proxy:
-        await proxy()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -101,14 +99,15 @@ DEFAULT_CONFIG = {
     "mic_interval_seconds": 8,
     "input_device_index": 1,
     "sample_rate": 16000,
-    "hide_inactive_moodes": False,
+    "hide_inactive_players": False,   # show a player only while it plays
     "screen_off_minutes": 0,          # 0 = never turn the local screen off
     "screen_wake_on_song": True,      # turn the screen back on when the ambient listener hears a song
     "spins_enabled": False,           # report plays to JPlay Spins (records.jplay.cloud)
     "spins_url": "https://records.jplay.cloud",
     "spins_token": "",                # listener token from JPlay Records → Settings → Listeners
-    "spins_room_moode": "",           # host of the moOde player in this room ("" = none)
-    "moodes": []
+    "spins_room_player": "",          # host of the JPlay player in this room ("" = none)
+    "radio_listen": True,             # recognise songs on radio stations that don't name them (listens to the stream)
+    "players": []                     # JPlay players: {id, name, host, port, enabled}
 }
 
 def _local_addresses():
@@ -222,6 +221,22 @@ def load_config():
             break
         except (FileNotFoundError, json.JSONDecodeError):
             continue
+    return migrate_config(cfg)
+
+def migrate_config(cfg):
+    """Settings from the moOde days: the JPlay players replaced the moOde players on the same Pis."""
+    if "players" not in cfg or (not cfg["players"] and cfg.get("moodes")):
+        cfg["players"] = [
+            {"id": f"player_{i + 1}", "name": m.get("name") or f"Player {i + 1}", "host": m.get("host", ""),
+             "port": players.DEFAULT_PORT, "enabled": m.get("enabled", True)}
+            for i, m in enumerate(cfg.get("moodes") or []) if m.get("host")
+        ]
+    if not cfg.get("spins_room_player") and cfg.get("spins_room_moode"):
+        cfg["spins_room_player"] = cfg["spins_room_moode"]
+    if "hide_inactive_moodes" in cfg and "hide_inactive_players" not in cfg:
+        cfg["hide_inactive_players"] = cfg["hide_inactive_moodes"]
+    for k in ("moodes", "spins_room_moode", "hide_inactive_moodes", "moode_proxy_port"):
+        cfg.pop(k, None)
     return cfg
 
 def save_config(config_data):
@@ -252,6 +267,7 @@ latest_ambient_state = {
 }
 
 _itunes_cache = {}
+_itunes_misses = {}   # (artist, title) -> retry after this time
 
 def extract_year(value):
     """Return a 4-digit year string from values like '1977', '1977-05-01', or ISO dates."""
@@ -305,6 +321,8 @@ def fetch_online_info(artist, title):
     key = (artist, title)
     if key in _itunes_cache:
         return _itunes_cache[key]
+    if _itunes_misses.get(key, 0) > time.time():
+        return default
     try:
         res = requests.get(
             "https://itunes.apple.com/search",
@@ -325,161 +343,9 @@ def fetch_online_info(artist, title):
             return info
     except Exception:
         pass
+    # Not found (or iTunes unreachable): don't ask again for a while; the players are polled every 2 s.
+    _itunes_misses[key] = time.time() + 600
     return default
-
-_moode_debug_last = {}
-_logo_cache = {}   # (host, station) -> (url, expiry timestamp)
-
-def _moode_rel(url):
-    """Normalise a moOde coverurl to a decoded path relative to the player's web root.
-    moOde may send encoded slashes ('imagesw%2Fradio-logos%2FBBC%20Radio%201.jpg')."""
-    if url.startswith(("http://", "https://")):
-        return url
-    return unquote(url).lstrip("/")
-
-def _moode_abs(host, rel):
-    if rel.startswith(("http://", "https://")):
-        return rel
-    return f"http://{host}/{quote(rel, safe='/')}"
-
-def _moode_debug(host, message):
-    """Print only when the message changes, so the log isn't flooded every poll."""
-    if _moode_debug_last.get(host) != message:
-        _moode_debug_last[host] = message
-        print(f"[moOde {host}] {message}")
-
-def find_station_logo(host, station):
-    """Look for the radio station logo in moOde's radio-logos folder. Cached."""
-    key = (host, station)
-    hit = _logo_cache.get(key)
-    if hit and hit[1] > time.time():
-        return hit[0]
-    found = ""
-    name = quote(station)
-    for path in (f"/imagesw/radio-logos/{name}.jpg", f"/imagesw/radio-logos/{name}.png",
-                 f"/imagesw/radio-logos/thumbs/{name}.jpg"):
-        url = f"http://{host}{path}"
-        try:
-            r = requests.head(url, timeout=2, allow_redirects=True)
-            if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
-                found = unquote(path).lstrip("/")
-                break
-        except Exception:
-            break
-    _logo_cache[key] = (found, time.time() + (3600 if found else 120))
-    return found
-
-def fetch_moode_art(host, station="", is_radio=False):
-    """Ask moOde itself for the current cover; for radio, fall back to the station logo.
-
-    Returns (path_or_url, note). The note says where the art came from or why none was found;
-    it is exposed in /api/dashboard as "art_debug" to make problems easy to diagnose.
-    """
-    url = ""
-    album = ""
-    notes = []
-    # moOde placeholders are all named default-*.jpg/png/svg (default-radio-cover.jpg, ...)
-    def usable(u):
-        return bool(u) and not unquote(u).rsplit("/", 1)[-1].lower().startswith("default")
-
-    # get_currentsong is the endpoint that returns the real radio logo (it needs
-    # moOde's "Metadata file" option ON); engine-mpd.php is only a fallback because
-    # it can report the generic radio placeholder for the same stream.
-    for endpoint in ("command/?cmd=get_currentsong", "engine-mpd.php?cmd=status"):
-        try:
-            data = requests.get(f"http://{host}/{endpoint}", timeout=6).json()
-            found = (data.get("coverurl") or "").strip()
-            album = album or str(data.get("album") or "")
-            notes.append(
-                f"{endpoint} @ {host}: coverurl={found!r} album={data.get('album')!r} "
-                f"state={data.get('state')!r} file={data.get('file')!r}"
-            )
-            url = url or found
-            if usable(found):
-                url = found
-                break
-        except Exception as e:
-            notes.append(f"{endpoint} @ {host} failed: {type(e).__name__}: {e}")
-    note = " | ".join(notes)
-    _moode_debug(host, note)
-    if usable(url):
-        return _moode_rel(url), note
-    # No real cover: for radio, moOde stores logos as radio-logos/<station name>.jpg.
-    # The station name is MPD's "name" tag or moOde's "album" field (unless "Unknown station").
-    for name in (station, album) if is_radio else ():
-        if name and name.lower() != "unknown station":
-            logo = find_station_logo(host, name)
-            if logo:
-                return logo, note + f" | logo found via station name {name!r}"
-    return "", note + " | no usable cover or station logo"
-
-def check_moode(instance):
-    try:
-        client = MPDClient()
-        client.timeout = 1
-        client.connect(instance["host"], int(instance["port"]))
-        status = client.status()
-        song = client.currentsong()
-        client.disconnect()
-
-        is_playing = status.get("state") == "play"
-        title = song.get("title", song.get("name", "Idle" if not is_playing else "Live Stream"))
-        artist = song.get("artist", "")
-        art_debug = ""
-        if is_playing:
-            info = fetch_online_info(artist, title)
-            # moOde's own cover (local art, embedded art, radio logos) beats an iTunes guess
-            is_radio = str(song.get("file", "")).startswith("http")
-            station = song.get("name", "") if is_radio else ""
-            rel, art_debug = fetch_moode_art(instance["host"], station, is_radio)
-            art = _moode_abs(instance["host"], rel) if rel else info["art"]
-        else:
-            info = {"art": "/static/idle.png", "year": "", "album": "", "genre": ""}
-            art = info["art"]
-        # Prefer MPD tags (usually more accurate), fall back to iTunes
-        year = extract_year(song.get("date") or song.get("originaldate")) or info["year"]
-        album = song.get("album") or info["album"]
-        genre = song.get("genre") or info["genre"]
-        if isinstance(genre, list):
-            genre = ", ".join(genre)
-        if isinstance(album, list):
-            album = album[0]
-
-        is_radio_stream = str(song.get("file", "")).startswith("http")
-        return {
-            "id": instance["id"],
-            "name": instance["name"],
-            "host": instance["host"],
-            "playing": is_playing,
-            # Raw MPD state for JPlay Spins (radio often has no track in its metadata)
-            "state": status.get("state", "stop"),
-            "is_radio": is_radio_stream,
-            "station": song.get("name", "") if is_radio_stream else "",
-            "raw_title": song.get("title", ""),
-            "raw_artist": song.get("artist", ""),
-            "raw_album": song.get("album", "") if not isinstance(song.get("album"), list) else song.get("album")[0],
-            "title": title,
-            "artist": artist,
-            "year": year if is_playing else "",
-            "album": album if is_playing else "",
-            "genre": genre if is_playing else "",
-            "coverart": art,
-            "art_debug": art_debug
-        }
-    except Exception as e:
-        print(f"[moOde {instance.get('host')}] check failed: {type(e).__name__}: {e}")
-        return {
-            "id": instance["id"],
-            "name": instance["name"],
-            "host": instance.get("host", ""),
-            "playing": False,
-            "state": "offline",
-            "title": "Offline",
-            "artist": "Connection Failed",
-            "coverart": "/static/offline.png"
-        }
-
-
 
 MIC_DEFAULT = "__default__"   # settings value meaning "the system's default input"
 
@@ -567,32 +433,112 @@ def record_audio(duration):
         "Failed to capture audio at supported sample rates (16kHz, 48kHz, 44.1kHz)."
     )
 
-moode_state = {}
 LAST_LEVEL_DB = None   # loudness of the last microphone clip (dBFS)
 
-async def background_moode_poller():
-    """Poll enabled moOde players and cache their state for the display."""
-    global moode_state
+# --- JPlay players ------------------------------------------------------------------
+player_cards = {}        # player id -> display card (see players.make_card)
+player_status = {}       # player id -> raw /api/v1/status (None = unreachable)
+last_player_activity = [0.0]   # last time any player was playing (keeps the screen on)
+radio = players.RadioListener()
+
+def configured_players(cfg, include_room=True):
+    """Enabled players, plus this room's player for JPlay Spins even when it isn't shown."""
+    shown = [p for p in cfg.get("players", []) if p.get("enabled", True) and p.get("host")]
+    room = str(cfg.get("spins_room_player") or "").strip()
+    if include_room and room and not any(p["host"] == room for p in shown):
+        port = next((p.get("port") for p in cfg.get("players", []) if p.get("host") == room), players.DEFAULT_PORT)
+        shown.append({"id": "room_player", "name": "This room", "host": room, "port": port, "hidden": True})
+    return shown
+
+def _build_card(p, status):
+    np = (status or {}).get("now_playing") or {}
+    station = (np.get("extra") or {}).get("station", "")
+    song = radio.current(p["id"], station, time.time()) if status and status.get("active") == "radio" else None
+    return players.make_card(p, status, song, fetch_online_info)
+
+async def background_player_poller():
+    """Ask every JPlay player what it's doing (every 2 seconds) and keep the cards for the display."""
+    global player_cards, player_status
     loop = asyncio.get_running_loop()
     while True:
         try:
             cfg = load_config()
-            instances = [i for i in cfg.get("moodes", []) if i.get("enabled", True)]
-            results = await asyncio.gather(
-                *(loop.run_in_executor(None, check_moode, i) for i in instances)
-            )
-            moode_state = {r["id"]: r for r in results}  # display only; not logged to history
-            room_host = str(cfg.get("spins_room_moode") or "").strip()
-            if spins.enabled(cfg) and room_host:
-                own = next((r for r in results if r.get("host") == room_host), None)
-                if own is None:
-                    # This room's player isn't in the display list (or is disabled): still watch it.
-                    port = next((m.get("port", 6600) for m in cfg.get("moodes", []) if m.get("host") == room_host), 6600)
-                    own = await loop.run_in_executor(None, check_moode, {"id": "spins_room", "name": "room", "host": room_host, "port": port})
-                spins.room_update(own)
+            ps = configured_players(cfg)
+            statuses = await asyncio.gather(*(loop.run_in_executor(None, players.fetch_status, p) for p in ps))
+            cards = await asyncio.gather(*(loop.run_in_executor(None, _build_card, p, st) for p, st in zip(ps, statuses)))
+            player_status = {p["id"]: st for p, st in zip(ps, statuses)}
+            player_cards = {c["id"]: {**c, "hidden": bool(p.get("hidden"))} for p, c in zip(ps, cards)}
+            if any(c["playing"] for c in cards):
+                last_player_activity[0] = time.time()
+            room = str(cfg.get("spins_room_player") or "").strip()
+            if spins.enabled(cfg) and room:
+                own = next((c for c in cards if c["host"] == room), None)
+                if own:
+                    spins.room_update(players.spins_room_data(own))
         except Exception as e:
-            print(f"moOde poller error: {e}")
+            print(f"Player poller error: {type(e).__name__}: {e}")
+        await asyncio.sleep(2)
+
+async def background_radio_listener():
+    """Radio without song names: record a few seconds of the stream and let Shazam name the song."""
+    loop = asyncio.get_running_loop()
+    while True:
         await asyncio.sleep(3)
+        try:
+            cfg = load_config()
+            if not cfg.get("radio_listen", True) or not shutil.which("ffmpeg"):
+                continue
+            now = time.time()
+            for pid, card in list(player_cards.items()):
+                url = players.needs_listening(card, player_status.get(pid))
+                if not url:
+                    if card.get("source") != "radio":
+                        radio.forget(pid)
+                    continue
+                if not radio.due(pid, now):
+                    continue
+                station = card.get("station", "")
+                try:
+                    audio = await loop.run_in_executor(None, players.record_stream, url)
+                    song = parse_shazam(await shazam.recognize(audio))
+                except Exception as e:
+                    radio.missed(pid, time.time(), f"listening failed: {type(e).__name__}: {e}")
+                    continue
+                if song:
+                    info = await loop.run_in_executor(None, fetch_online_info, song["artist"], song["title"])
+                    song["year"] = song["year"] or info["year"]
+                    song["album"] = song["album"] or info["album"]
+                    song["genre"] = song["genre"] or info["genre"]
+                    radio.heard(pid, station, song, time.time())   # the next poll (2 s) shows it
+                else:
+                    radio.missed(pid, time.time(), "no song recognised (talk, ads or unknown music)")
+        except Exception as e:
+            print(f"Radio listener error: {type(e).__name__}: {e}")
+
+def parse_shazam(out):
+    """Shazam's answer -> {title, artist, album, year, genre, cover, key, isrc}, or None."""
+    track = (out or {}).get("track") or {}
+    if not track:
+        return None
+    images = track.get("images", {})
+    year = album = ""
+    for section in track.get("sections", []):
+        for item in section.get("metadata", []):
+            label = str(item.get("title", "")).lower()
+            if label == "released":
+                year = extract_year(item.get("text"))
+            elif label == "album":
+                album = item.get("text", "")
+    return {
+        "title": track.get("title", "Unknown Title"),
+        "artist": track.get("subtitle", "Unknown Artist"),
+        "album": album,
+        "year": year,
+        "genre": (track.get("genres") or {}).get("primary", ""),
+        "cover": images.get("coverarthq") or images.get("coverart") or "",
+        "key": track.get("key", ""),
+        "isrc": track.get("isrc", ""),
+    }
 
 MIN_PLAY_SECONDS = 20          # a song must be heard this long before it enters history
 MIC_SOURCE_NAME = "Ambient Listener"
@@ -777,6 +723,10 @@ def _screen_log(message):
         _screen_log_last[0] = message
         print(f"[screen] {message}")
 
+def last_activity(started):
+    """Last time something played: a song the microphone heard, or a JPlay player playing."""
+    return max(pending_play["heard"] or started, last_player_activity[0])
+
 async def background_screen_manager():
     """Turn the local screen off after N quiet minutes and back on when a song is heard."""
     loop = asyncio.get_running_loop()
@@ -798,22 +748,23 @@ async def background_screen_manager():
                 manager="running", kiosk_active=kiosk_active, mic_enabled=cfg.get("mic_enabled", True),
                 off_after_minutes=to_int(cfg.get("screen_off_minutes"), 0, minimum=0, maximum=1440),
                 wake_on_song=cfg.get("screen_wake_on_song", True),
-                seconds_since_last_song=round(now - (pending_play["heard"] or started)),
+                seconds_since_last_song=round(now - last_activity(started)),
                 screen_on_assumed=screen_on,
             )
             # Only manage the screen while the local display is in use and the mic is listening;
             # make sure we never leave it switched off otherwise.
-            if not (kiosk_active and cfg.get("mic_enabled", True)):
+            watching = cfg.get("mic_enabled", True) or bool(cfg.get("players"))
+            if not (kiosk_active and watching):
                 _screen_log(
-                    f"idle: kiosk_active={kiosk_active} mic={cfg.get('mic_enabled', True)} "
-                    "(screen control only runs while the kiosk service is active and the mic is on)"
+                    f"idle: kiosk_active={kiosk_active} mic={cfg.get('mic_enabled', True)} players={len(cfg.get('players', []))} "
+                    "(screen control only runs while the kiosk service is active and something is watched)"
                 )
                 if not screen_on and await loop.run_in_executor(None, set_screen_power, True):
                     screen_on, idle_since = True, now
                 continue
 
             minutes = to_int(cfg.get("screen_off_minutes"), 0, minimum=0, maximum=1440)
-            heard = pending_play["heard"] or started   # last time the ambient listener heard a song
+            heard = last_activity(started)   # last song heard or player playing
 
             # Notice if the screen was switched by hand (touch/keyboard wakes it)
             actual = await loop.run_in_executor(None, get_screen_power)
@@ -902,37 +853,37 @@ async def save_settings(request: Request):
             if match:
                 cfg["input_device_index"] = match["index"]
 
-    names = form.getlist("moode_name")
-    hosts = form.getlist("moode_host")
-    ports = form.getlist("moode_port")
-    enabled_rows = set(form.getlist("moode_enabled"))  # row indexes that are ticked
-    cfg["hide_inactive_moodes"] = form.get("hide_inactive_moodes") == "on"
+    names = form.getlist("player_name")
+    hosts = form.getlist("player_host")
+    ports = form.getlist("player_port")
+    enabled_rows = set(form.getlist("player_enabled"))  # row indexes that are ticked
+    cfg["hide_inactive_players"] = form.get("hide_inactive_players") == "on"
     cfg["screen_off_minutes"] = to_int(form.get("screen_off_minutes"), 0, minimum=0, maximum=1440)
     cfg["screen_wake_on_song"] = form.get("screen_wake_on_song") == "on"
+    cfg["radio_listen"] = form.get("radio_listen") == "on"
 
-    updated_moodes = []
+    updated = []
     for i, host in enumerate(hosts):
         host = host.strip()
         if not host:
             continue
         name = names[i].strip() if i < len(names) else ""
-        port = to_int(ports[i] if i < len(ports) else None, 6600, minimum=1, maximum=65535)
-        updated_moodes.append({
-            "id": f"moode_{len(updated_moodes)+1}",
-            "name": name or f"moOde {len(updated_moodes)+1}",
+        port = to_int(ports[i] if i < len(ports) else None, players.DEFAULT_PORT, minimum=1, maximum=65535)
+        updated.append({
+            "id": f"player_{len(updated) + 1}",
+            "name": name or f"Player {len(updated) + 1}",
             "host": host,
             "port": port,
-            "enabled": str(i) in enabled_rows
+            "enabled": str(i) in enabled_rows,
         })
-
-    cfg["moodes"] = updated_moodes
+    cfg["players"] = updated
 
     cfg["spins_enabled"] = form.get("spins_enabled") == "on"
     cfg["spins_url"] = str(form.get("spins_url") or "").strip().rstrip("/") or DEFAULT_CONFIG["spins_url"]
     new_token = str(form.get("spins_token") or "").strip()
     if new_token:                      # empty field = keep the saved token
         cfg["spins_token"] = new_token
-    cfg["spins_room_moode"] = str(form.get("spins_room_moode") or "").strip()
+    cfg["spins_room_player"] = str(form.get("spins_room_player") or "").strip()
     save_config(cfg)
 
     enable_kiosk = form.get("local_kiosk") == "on"
@@ -977,94 +928,17 @@ async def shutdown_system(request: Request):
     except Exception as e:
         return {"error": str(e)}
 
-# --- moOde web UI relay -------------------------------------------------------------
-# moOde keeps its state in a PHP session cookie. Embedded straight from the player's own
-# address that cookie is "third-party" and the browser drops it, leaving moOde blank.
-# So moOde is relayed through this Pi on its own port (same site as the dashboard).
-# Which player it talks to is remembered in the "jpn_moode" cookie.
-MOODE_PROXY_PORT = 5100
-_HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
-                "trailers", "transfer-encoding", "upgrade", "host", "content-length",
-                "x-frame-options"}
-
-def moode_proxy_port(cfg=None):
-    return to_int((cfg or load_config()).get("moode_proxy_port"), MOODE_PROXY_PORT, minimum=1024, maximum=65535)
-
-async def start_moode_proxy():
-    """Start the relay. Returns an async cleanup function, or None if it could not start."""
-    try:
-        from aiohttp import web, ClientSession, ClientTimeout
-    except ImportError:
-        print("[moOde relay] aiohttp is not installed; moOde controls are unavailable")
-        return None
-
-    client = ClientSession(auto_decompress=False,
-                           timeout=ClientTimeout(total=None, sock_connect=5, sock_read=120))
-
-    async def handler(request):
-        if request.path.startswith("/__jpn/select/"):
-            resp = web.Response(status=302, headers={"Location": "/", "Cache-Control": "no-store"})
-            resp.set_cookie("jpn_moode", request.path.rsplit("/", 1)[-1], path="/", samesite="Lax")
-            return resp
-        player_id = request.cookies.get("jpn_moode", "")
-        player = next((m for m in load_config().get("moodes", []) if m.get("id") == player_id), None)
-        if not player:
-            return web.Response(status=404, content_type="text/html",
-                                text="<p style='font-family:sans-serif'>No moOde player selected. "
-                                     "Go back to JPlaying Now and tap a player.</p>")
-        base = f"http://{player['host']}"
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
-        body = await request.read()
-        try:
-            async with client.request(request.method, base + str(request.rel_url), headers=headers,
-                                      data=body or None, allow_redirects=False) as up:
-                data = await up.read()
-                resp = web.Response(status=up.status, reason=up.reason, body=data)
-                for k, v in up.headers.items():
-                    if k.lower() in _HOP_HEADERS:
-                        continue
-                    if k.lower() == "location":
-                        v = v.replace(base, "", 1)        # keep redirects on the relay
-                    resp.headers.add(k, v)
-                return resp
-        except Exception as e:
-            return web.Response(status=502, text=f"moOde '{player.get('name')}' ({player['host']}) "
-                                                 f"is not reachable: {type(e).__name__}: {e}")
-
-    relay = web.Application(client_max_size=64 * 1024 * 1024)
-    relay.router.add_route("*", "/{tail:.*}", handler)
-    runner = web.AppRunner(relay, access_log=None)
-    await runner.setup()
-    port = moode_proxy_port()
-    try:
-        await web.TCPSite(runner, "0.0.0.0", port).start()
-        print(f"[moOde relay] listening on port {port}")
-    except OSError as e:
-        print(f"[moOde relay] could not listen on port {port}: {e}")
-        await runner.cleanup()
-        await client.close()
-        return None
-
-    async def stop():
-        await runner.cleanup()
-        await client.close()
-    return stop
-
-@app.get("/moode/{moode_id}", response_class=HTMLResponse)
-async def moode_page(request: Request, moode_id: str):
-    """Full-screen moOde web UI for one player, with a bar to get back to the dashboard."""
+@app.get("/player/{player_id}", response_class=HTMLResponse)
+async def player_page(request: Request, player_id: str):
+    """A JPlay player's own web page (sources, browsing, controls), with a bar back to the display."""
     cfg = load_config()
-    player = next((m for m in cfg.get("moodes", []) if m.get("id") == moode_id), None)
+    player = next((p for p in cfg.get("players", []) if p.get("id") == player_id), None)
     if not player:
         return RedirectResponse(url="/", status_code=303)
-    host = request.url.hostname or "localhost"
-    if ":" in host:
-        host = f"[{host}]"   # IPv6 literal
-    moode_url = f"http://{host}:{moode_proxy_port(cfg)}/__jpn/select/{quote(moode_id, safe='')}"
     return templates.TemplateResponse(
         request=request,
-        name="moode.html",
-        context={"config": cfg, "player": player, "moode_url": moode_url},
+        name="player.html",
+        context={"config": cfg, "player": player, "player_url": players.base_url(player) + "/"},
     )
 
 @app.get("/manifest.webmanifest")
@@ -1073,7 +947,7 @@ async def web_manifest():
     return JSONResponse({
         "name": "JPlaying Now",
         "short_name": "JPlaying Now",
-        "description": "What's playing on the moOde players and the ambient listener",
+        "description": "What's playing on the JPlay players and the ambient listener",
         "id": "/",
         "start_url": "/",
         "scope": "/",
@@ -1134,22 +1008,25 @@ async def api_screen_status():
     """What the screen manager currently sees (for troubleshooting)."""
     return screen_status
 
+@app.get("/api/players-status")
+async def api_players_status():
+    """Raw player status and the radio listener's last result per player (for troubleshooting)."""
+    return {"players": player_status, "radio_listener": radio.status, "ffmpeg": bool(shutil.which("ffmpeg"))}
+
 @app.get("/api/dashboard")
 async def get_dashboard():
     cfg = load_config()
-    # Served from the background poller's cache, so the page never waits on MPD
-    moode_data = [
-        moode_state[i["id"]]
-        for i in cfg.get("moodes", [])
-        if i.get("enabled", True) and i["id"] in moode_state
+    # Served from the background poller's cache, so the page never waits on a player
+    cards = [
+        player_cards[p["id"]]
+        for p in cfg.get("players", [])
+        if p.get("enabled", True) and p["id"] in player_cards
     ]
-    if cfg.get("hide_inactive_moodes"):
-        # Show a player only while it is actually playing (hides paused/stopped/offline ones)
-        moode_data = [m for m in moode_data if m.get("playing")]
-
+    if cfg.get("hide_inactive_players"):
+        cards = [c for c in cards if c.get("playing")]
     return {
         "config": cfg,
-        "moodes": moode_data,
+        "players": cards,
         "ambient": latest_ambient_state
     }
 

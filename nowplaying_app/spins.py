@@ -6,8 +6,9 @@ record or stream); this side only reports:
 
   mic      the microphone recognised a song (title, artist, album, cover, loudness)
   mic_end  that song is no longer heard
-  room     this room's moOde changed state (play/pause/stop, radio station or file, metadata);
-           repeated every few minutes as a heartbeat
+  room     this room's JPlay player changed state: play/pause/stop, the source (radio, plex, cd, spotify,
+           bluetooth), the radio station and the song if known (for radio also songs recognised from the
+           stream); repeated every few minutes as a heartbeat
 """
 import json
 import sqlite3
@@ -68,17 +69,9 @@ def queue(event_type, ts, data):
     return eid
 
 
-def room_update(player):
-    """Called by the moOde poller with this room's player state; queues a 'room' event on change or as heartbeat."""
-    state = player.get("state") or ("play" if player.get("playing") else "stop")
-    data = {
-        "state": state,
-        "mode": "radio" if player.get("is_radio") else "file",
-        "station": player.get("station", "") if state == "play" else "",
-        "title": player.get("raw_title", "") if state == "play" else "",
-        "artist": player.get("raw_artist", "") if state == "play" else "",
-        "album": player.get("raw_album", "") if state == "play" else "",
-    }
+def room_update(data):
+    """Called by the player poller with this room's player state (players.spins_room_data);
+    queues a 'room' event when it changes, and as a heartbeat."""
     sig = json.dumps(data, sort_keys=True)
     now = time.time()
     if sig != _room["sig"] or now - _room["sent"] >= HEARTBEAT_SECONDS:

@@ -5,8 +5,6 @@ jinja2
 python-multipart        # form parsing for the settings page
 shazamio                # song recognition
 audioop-lts; python_version >= "3.13"   # shazamio needs audioop, which Python 3.13 removed
-python-mpd2             # moOde (MPD) status
-requests
+requests                # JPlay players' status, iTunes covers
 sounddevice             # microphone (needs the libportaudio2 system package)
 numpy
-aiohttp                 # moOde controls relay

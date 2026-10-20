@@ -21,7 +21,7 @@
         body { display: flex; flex-direction: column; background: var(--bar, #0f111a); color: var(--fg, #fff);
                font-family: system-ui, sans-serif; overflow: hidden; }
 
-        /* Slim bar above moOde so it never covers moOde's own buttons */
+        /* Slim bar above the player's page so it never covers the player's own buttons */
         .bar { flex: none; display: flex; align-items: center; gap: 12px; padding: 6px 10px; font-size: clamp(13px, 3vmin, 17px); }
         .back { display: inline-flex; align-items: center; gap: 0.5em; background: #10b981; color: #fff; text-decoration: none;
                 font-weight: 700; padding: 0.45em 0.9em; border-radius: 10px; }
@@ -44,6 +44,6 @@
         </a>
         <span class="player">{{ player.name }}</span>
     </div>
-    <iframe src="{{ moode_url }}" title="{{ player.name }} (moOde)" allow="autoplay; fullscreen"></iframe>
+    <iframe src="{{ player_url }}" title="{{ player.name }} (JPlay)" allow="autoplay; fullscreen"></iframe>
 </body>
 </html>

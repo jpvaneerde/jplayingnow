@@ -116,23 +116,34 @@
         </div>
 
         <div class="card">
-            <h3>moOde Players</h3>
-            <p style="font-size: 0.85rem; color: #9ca3af; margin-top: 0;">Tick a player to show it on the display.</p>
+            <h3>JPlay Players</h3>
+            <p style="font-size: 0.85rem; color: #9ca3af; margin-top: 0;">
+                The players this display shows (address and port of the player's web page, usually 8080).
+                Tick a player to show it on the display.
+            </p>
             <label class="checkbox-label" style="margin-bottom: 12px;">
-                <input type="checkbox" name="hide_inactive_moodes" {% if config.hide_inactive_moodes %}checked{% endif %}>
+                <input type="checkbox" name="hide_inactive_players" {% if config.hide_inactive_players %}checked{% endif %}>
                 Automatically hide players that are paused, stopped or offline (show again when playing)
             </label>
-            <div id="moode-list">
-                {% for m in config.moodes %}
+            <div id="player-list">
+                {% for p in config.players %}
                 <div class="row">
-                    <input type="checkbox" name="moode_enabled" value="{{ loop.index0 }}" title="Show on display" style="width: 18px; flex: none;" {% if m.enabled is not defined or m.enabled %}checked{% endif %}>
-                    <input type="text" name="moode_name" value="{{ m.name }}" placeholder="Name">
-                    <input type="text" name="moode_host" value="{{ m.host }}" placeholder="IP Address">
-                    <input type="number" name="moode_port" value="{{ m.port }}" style="width: 100px;">
+                    <input type="checkbox" name="player_enabled" value="{{ loop.index0 }}" title="Show on display" style="width: 18px; flex: none;" {% if p.enabled is not defined or p.enabled %}checked{% endif %}>
+                    <input type="text" name="player_name" value="{{ p.name }}" placeholder="Name">
+                    <input type="text" name="player_host" value="{{ p.host }}" placeholder="IP Address">
+                    <input type="number" name="player_port" value="{{ p.port }}" style="width: 100px;">
                 </div>
                 {% endfor %}
             </div>
-            <button type="button" class="btn btn-add" onclick="addMoodeRow()">+ Add moOde Player</button>
+            <button type="button" class="btn btn-add" onclick="addPlayerRow()">+ Add JPlay Player</button>
+            <label class="checkbox-label" style="margin-top: 16px;">
+                <input type="checkbox" name="radio_listen" {% if config.radio_listen %}checked{% endif %}>
+                Recognise songs on radio stations that don't name them
+            </label>
+            <p style="font-size: 0.8rem; color: #9ca3af; margin: 6px 0 0;">
+                While a player plays a station that only sends its own name, this unit listens to the stream
+                (10 seconds every half minute) and shows the song it recognises. Needs ffmpeg.
+            </p>
         </div>
 
         <div class="card">
@@ -151,15 +162,17 @@
             <label>Listener token</label>
             <input type="password" name="spins_token" value="" autocomplete="off"
                    placeholder="{{ 'Saved (leave empty to keep it)' if config.spins_token else 'Paste the token' }}">
-            <label>moOde player in this room</label>
-            <select name="spins_room_moode">
-                <option value="" {% if not config.spins_room_moode %}selected{% endif %}>None (no moOde in this room)</option>
-                {% for m in config.moodes %}
-                <option value="{{ m.host }}" {% if config.spins_room_moode == m.host %}selected{% endif %}>{{ m.name }} ({{ m.host }})</option>
+            <label>JPlay player in this room</label>
+            <select name="spins_room_player">
+                <option value="" {% if not config.spins_room_player %}selected{% endif %}>None (no JPlay player in this room)</option>
+                {% for p in config.players %}
+                <option value="{{ p.host }}" {% if config.spins_room_player == p.host %}selected{% endif %}>{{ p.name }} ({{ p.host }})</option>
                 {% endfor %}
             </select>
             <p style="font-size: 0.8rem; color: #9ca3af; margin: 6px 0 0;">
-                While this player is playing, songs the microphone hears count as streamed (radio or files), not as your own records.<br>
+                While this player plays, JPlay Spins files the songs under its source: Radio, Plex, Spotify or
+                Bluetooth, and a CD in the player as your CD. When it's idle, what the microphone hears is matched
+                against your records and CDs as before.<br>
                 Status: {{ spins.queued }} waiting to be sent · last sent {{ spins_seen.last_ok }}
                 {% if spins.last_error %}<br><span style="color: #fca5a5;">Last error: {{ spins.last_error }}</span>{% endif %}
             </p>
@@ -180,17 +193,17 @@
     {% endif %}
 
     <script>
-        function addMoodeRow() {
+        function addPlayerRow() {
             const div = document.createElement('div');
             div.className = 'row';
-            const idx = document.querySelectorAll('#moode-list .row').length;
+            const idx = document.querySelectorAll('#player-list .row').length;
             div.innerHTML = `
-                <input type="checkbox" name="moode_enabled" value="${idx}" title="Show on display" style="width: 18px; flex: none;" checked>
-                <input type="text" name="moode_name" placeholder="Name">
-                <input type="text" name="moode_host" placeholder="IP Address">
-                <input type="number" name="moode_port" value="6600" style="width: 100px;">
+                <input type="checkbox" name="player_enabled" value="${idx}" title="Show on display" style="width: 18px; flex: none;" checked>
+                <input type="text" name="player_name" placeholder="Name">
+                <input type="text" name="player_host" placeholder="IP Address">
+                <input type="number" name="player_port" value="8080" style="width: 100px;">
             `;
-            document.getElementById('moode-list').appendChild(div);
+            document.getElementById('player-list').appendChild(div);
         }
 
         async function systemAction(action) {
