@@ -436,7 +436,7 @@ LAST_LEVEL_DB = None   # loudness of the last microphone clip (dBFS)
 # --- JPlay players ------------------------------------------------------------------
 player_cards = {}        # player id -> display card (see players.make_card)
 player_status = {}       # player id -> raw /api/v1/status (None = unreachable)
-last_player_activity = [0.0]   # last time any player was playing (keeps the screen on)
+last_player_activity = [0.0]   # last time this display's player was playing (keeps the screen on)
 paused_since = {}        # player id -> when it was paused (the display goes back to the listener after a while)
 SHOW_PAUSED_SECONDS = 300
 radio = players.RadioListener()
@@ -479,7 +479,9 @@ async def background_player_poller():
                           "show": c["playing"] or (c["state"] == "paused" and now - paused_since[c["id"]] < SHOW_PAUSED_SECONDS)}
                 for p, c in zip(ps, cards)
             }
-            if any(c["playing"] for c in cards):
+            # Only the player this display shows keeps its screen on (not the one in the other room).
+            shown = view_player(cfg)
+            if shown and player_cards.get(shown["id"], {}).get("playing"):
                 last_player_activity[0] = time.time()
             room = str(cfg.get("spins_room_player") or "").strip()
             if spins.enabled(cfg) and room:
@@ -763,6 +765,9 @@ async def background_screen_manager():
                 off_after_minutes=to_int(cfg.get("screen_off_minutes"), 0, minimum=0, maximum=1440),
                 wake_on_song=cfg.get("screen_wake_on_song", True),
                 seconds_since_last_song=round(now - last_activity(started)),
+                # Which one keeps the screen on: the microphone hearing music, or this display's player playing
+                seconds_since_mic_heard_song=round(now - (pending_play["heard"] or started)),
+                seconds_since_player_played=round(now - last_player_activity[0]) if last_player_activity[0] else None,
                 screen_on_assumed=screen_on,
             )
             # Only manage the screen while the local display is in use and the mic is listening;
