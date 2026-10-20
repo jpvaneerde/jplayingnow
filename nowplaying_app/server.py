@@ -437,6 +437,8 @@ LAST_LEVEL_DB = None   # loudness of the last microphone clip (dBFS)
 player_cards = {}        # player id -> display card (see players.make_card)
 player_status = {}       # player id -> raw /api/v1/status (None = unreachable)
 last_player_activity = [0.0]   # last time any player was playing (keeps the screen on)
+paused_since = {}        # player id -> when it was paused (the display goes back to the listener after a while)
+SHOW_PAUSED_SECONDS = 300
 radio = players.RadioListener()
 
 def configured_players(cfg, include_room=True):
@@ -465,7 +467,18 @@ async def background_player_poller():
             statuses = await asyncio.gather(*(loop.run_in_executor(None, players.fetch_status, p) for p in ps))
             cards = await asyncio.gather(*(loop.run_in_executor(None, _build_card, p, st) for p, st in zip(ps, statuses)))
             player_status = {p["id"]: st for p, st in zip(ps, statuses)}
-            player_cards = {c["id"]: {**c, "hidden": bool(p.get("hidden"))} for p, c in zip(ps, cards)}
+            now = time.time()
+            for c in cards:
+                if c["state"] == "paused":
+                    paused_since.setdefault(c["id"], now)
+                else:
+                    paused_since.pop(c["id"], None)
+            player_cards = {
+                c["id"]: {**c, "hidden": bool(p.get("hidden")),
+                          # Worth showing: playing, or paused only a little while. Otherwise the display shows the listener.
+                          "show": c["playing"] or (c["state"] == "paused" and now - paused_since[c["id"]] < SHOW_PAUSED_SECONDS)}
+                for p, c in zip(ps, cards)
+            }
             if any(c["playing"] for c in cards):
                 last_player_activity[0] = time.time()
             room = str(cfg.get("spins_room_player") or "").strip()

@@ -218,7 +218,7 @@
 
         // The player is idle (or there is none): what the microphone hears in this room.
         function listenerView(a, p) {
-            const idle = !p ? '' : !p.online ? `${p.name} is offline` : `${p.name} is idle`;
+            const idle = !p ? '' : !p.online ? `${p.name} is offline` : p.state === 'paused' ? `${p.name} is paused` : `${p.name} is idle`;
             return {
                 src: 'mic', live: !!a.identified, href: '', chips: [`<span class="chip">${ICONS.mic}Heard in this room${a.identified ? EQ : ''}</span>`],
                 title: a.title, artist: a.artist, sub: [a.album, a.year].filter(Boolean).join(' · '),
@@ -259,7 +259,8 @@
                 data = await (await fetch('/api/dashboard')).json();
                 document.body.className = THEMES.includes(data.config.theme) ? data.config.theme : 'dark';
                 const p = data.player;
-                const active = p && p.online && p.source;          // playing or paused: show the player
+                // Playing, or paused for a moment: the player. Stopped, idle, or paused for a while: the listener.
+                const active = p && p.online && p.source && p.show;
                 const v = active ? playerView(p, data.radio_listen) : listenerView(data.ambient, p);
                 const html = render(v);
                 if (html !== lastHtml) {
