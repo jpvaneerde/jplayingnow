@@ -270,6 +270,7 @@
                     fit();
                     lastHtml = html;
                 }
+                if (data.screen) screenOff = !data.screen.on && Date.now() - wokeAt > 4000;
                 clock = active && p.duration ? { pos: p.position || 0, dur: p.duration, at: performance.now(), running: p.playing } : { dur: 0 };
                 tick();
                 updateMenu();
@@ -331,6 +332,16 @@
             update();
         });
         document.addEventListener('click', e => { if (!e.target.closest('#menu')) menu.classList.remove('open'); });
+
+        // On the Pi's own screen, the tap that wakes the screen only wakes it: it doesn't open the player or a menu.
+        let screenOff = false, wokeAt = 0;
+        const KIOSK = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+        const swallowWakingTap = e => {
+            if (!KIOSK) return;
+            if (screenOff) { screenOff = false; wokeAt = Date.now(); }
+            if (Date.now() - wokeAt < 1200) { e.preventDefault(); e.stopPropagation(); }
+        };
+        for (const t of ['pointerdown', 'pointerup', 'click']) document.addEventListener(t, swallowWakingTap, true);
 
         // Tap the panel (while the player plays) to open the player's own page
         panel.addEventListener('click', () => { if (panel.dataset.href) location.href = panel.dataset.href; });

@@ -11,6 +11,11 @@ recognises CDs and records). The web app (`nowplaying_app/server.py`, FastAPI) r
 shows it in a Chromium kiosk. The player's name next to **History** opens a menu: open the player's own page (also
 when it's idle), or switch the display to another player. Tapping the screen while it plays opens the player too.
 
+The screen switches off after the minutes set in Settings without music, and back on for a new song or a touch (the
+touch that wakes it does nothing else). Home Assistant can show and control each unit (screen on/off, which player
+it shows, what it hears): see the JPlay integration in
+[player-jplay](https://github.com/jpvaneerde/player-jplay/tree/main/custom_components/jplay).
+
 Settings (`/settings`) and play history (`/history`) are stored on the device in `nowplaying_app/config.json` and
 `nowplaying_app/data/history.db`. Git never overwrites them.
 
@@ -171,6 +176,7 @@ cd ~/jplayingnow && git pull && .venv/bin/pip install -r requirements.txt && sud
 | --- | --- |
 | `server.py` exits straight away | It prints the missing package or library; see step 3. |
 | Service not running | `systemctl status jplayingnow --no-pager` and `journalctl -u jplayingnow -n 50` |
+| Touching the screen doesn't wake it | Look at `touch` in http://&lt;pi&gt;:5000/api/screen-status: `devices` should be 1 or more. If `no_permission` isn't 0, run `sudo usermod -aG input jp` and reboot. |
 | Screen stays black / kiosk error on the settings page | `systemctl status kiosk --no-pager`. Check the Chromium path (step 7) and that `id -u` is 1000. |
 | No songs recognised | Settings → Ambient Listening shows which microphone is used; pick the USB one and check the volume near the speakers. |
 | A player shows "Offline" | Check its address and port (8080) under Settings → JPlay Players, and that `http://<player>:8080` opens. |

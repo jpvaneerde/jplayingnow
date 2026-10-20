@@ -41,6 +41,7 @@ try:
     import history
     import players
     import spins
+    import touchwake
 except Exception:
     # Imports run with stderr silenced (to hide ALSA noise); show why startup failed instead of exiting silently.
     os.dup2(old_stderr, 2)
@@ -733,6 +734,18 @@ def set_screen_power(on):
 screen_status = {"manager": "starting"}   # live view of the screen manager, see /api/screen-status
 _screen_log_last = [None]
 
+# The screen as the manager sees it. Shared with /api/screen (Home Assistant) and the display page.
+screen = {
+    "on": True,
+    "changed": time.time(),   # when it last went on or off
+    "off_at": 0.0,
+    "idle_since": time.time(), # restarted by a touch or a manual wake
+    "hold_off": False,         # switched off by hand (Home Assistant): stays off until a touch, a song or "on"
+}
+screen_wake = None             # asyncio.Event: a touch or a request wants the manager now
+screen_request = [None]        # "on" / "off" from /api/screen
+touch_watcher = None
+
 def _screen_log(message):
     """Print a screen-manager status line only when it changes."""
     if _screen_log_last[0] != message:
@@ -743,34 +756,76 @@ def last_activity(started):
     """Last time something played: a song the microphone heard, or a JPlay player playing."""
     return max(pending_play["heard"] or started, last_player_activity[0])
 
+def _screen_set(on, now):
+    screen["on"] = on
+    screen["changed"] = now
+    if on:
+        screen["idle_since"] = now
+        screen["hold_off"] = False
+    else:
+        screen["off_at"] = now
+
 async def background_screen_manager():
-    """Turn the local screen off after N quiet minutes and back on when a song is heard."""
+    """Turn the local screen off after N quiet minutes, and back on for a song, a touch or Home Assistant."""
+    global screen_wake, touch_watcher
     loop = asyncio.get_running_loop()
     started = time.time()
-    screen_on = True
-    off_at = 0.0
-    idle_since = started          # restarted whenever someone wakes the screen by hand
+    screen_wake = asyncio.Event()
+    touched = [0.0]
+
+    def on_touch():                       # runs in the watcher's thread
+        touched[0] = time.time()
+        loop.call_soon_threadsafe(screen_wake.set)
+
+    touch_watcher = touchwake.InputWatcher(on_touch)
+    touch_watcher.start()
+    handled_touch = 0.0
     kiosk_active, kiosk_checked = False, 0.0
     while True:
-        await asyncio.sleep(5)
+        try:
+            await asyncio.wait_for(screen_wake.wait(), 5)
+        except asyncio.TimeoutError:
+            pass
+        screen_wake.clear()
         try:
             cfg = load_config()
             now = time.time()
             if now - kiosk_checked > 30:
                 kiosk_active = await loop.run_in_executor(None, is_service_active, "kiosk")
                 kiosk_checked = now
+            minutes = to_int(cfg.get("screen_off_minutes"), 0, minimum=0, maximum=1440)
+
+            # A touch on the screen: wake it, or (when on) count as activity
+            if touched[0] > handled_touch:
+                handled_touch = touched[0]
+                if not screen["on"]:
+                    if await loop.run_in_executor(None, set_screen_power, True):
+                        _screen_set(True, now)
+                        _screen_log("screen woken by a touch")
+                else:
+                    screen["idle_since"] = now
+
+            # Home Assistant (or anything else) asked for on/off
+            wanted, screen_request[0] = screen_request[0], None
+            if wanted == "on" and await loop.run_in_executor(None, set_screen_power, True):
+                _screen_set(True, now)
+            elif wanted == "off" and await loop.run_in_executor(None, set_screen_power, False):
+                _screen_set(False, now)
+                screen["hold_off"] = True
 
             screen_status.update(
                 manager="running", kiosk_active=kiosk_active, mic_enabled=cfg.get("mic_enabled", True),
-                off_after_minutes=to_int(cfg.get("screen_off_minutes"), 0, minimum=0, maximum=1440),
+                off_after_minutes=minutes,
                 wake_on_song=cfg.get("screen_wake_on_song", True),
                 seconds_since_last_song=round(now - last_activity(started)),
                 # Which one keeps the screen on: the microphone hearing music, or this display's player playing
                 seconds_since_mic_heard_song=round(now - (pending_play["heard"] or started)),
                 seconds_since_player_played=round(now - last_player_activity[0]) if last_player_activity[0] else None,
-                screen_on_assumed=screen_on,
+                screen_on_assumed=screen["on"],
+                switched_off_by_hand=screen["hold_off"],
+                touch=touch_watcher.status(),
             )
-            # Only manage the screen while the local display is in use and the mic is listening;
+            # Only manage the screen while the local display is in use and something is watched;
             # make sure we never leave it switched off otherwise.
             watching = cfg.get("mic_enabled", True) or bool(cfg.get("players"))
             if not (kiosk_active and watching):
@@ -778,37 +833,34 @@ async def background_screen_manager():
                     f"idle: kiosk_active={kiosk_active} mic={cfg.get('mic_enabled', True)} players={len(cfg.get('players', []))} "
                     "(screen control only runs while the kiosk service is active and something is watched)"
                 )
-                if not screen_on and await loop.run_in_executor(None, set_screen_power, True):
-                    screen_on, idle_since = True, now
+                if not screen["on"] and await loop.run_in_executor(None, set_screen_power, True):
+                    _screen_set(True, now)
                 continue
 
-            minutes = to_int(cfg.get("screen_off_minutes"), 0, minimum=0, maximum=1440)
             heard = last_activity(started)   # last song heard or player playing
 
-            # Notice if the screen was switched by hand (touch/keyboard wakes it)
+            # Notice if the screen was switched by other means (keyboard, another program)
             actual = await loop.run_in_executor(None, get_screen_power)
             _screen_log(
                 f"kiosk_active={kiosk_active} mic={cfg.get('mic_enabled', True)} off_after={minutes}min "
-                f"screen_on={screen_on} reported_by_system={actual}"
+                f"screen_on={screen['on']} reported_by_system={actual}"
             )
             screen_status.update(screen_reported_by_system=actual,
-                                 seconds_idle=round(now - max(heard, idle_since)))
-            if actual is not None and actual != screen_on:
-                screen_on = actual
-                if actual:
-                    idle_since = now      # fresh countdown after a manual wake
+                                 seconds_idle=round(now - max(heard, screen["idle_since"])))
+            if actual is not None and actual != screen["on"]:
+                _screen_set(actual, now)
 
-            if screen_on:
-                if minutes > 0 and now - max(heard, idle_since) > minutes * 60:
+            if screen["on"]:
+                if minutes > 0 and now - max(heard, screen["idle_since"]) > minutes * 60:
                     ok = await loop.run_in_executor(None, set_screen_power, False)
                     _screen_log(f"turning screen off after {minutes} min without a song: {'ok' if ok else 'FAILED'}")
                     if ok:
-                        screen_on, off_at = False, now
+                        _screen_set(False, now)
             else:
-                heard_new_song = heard > off_at
-                if minutes == 0 or (cfg.get("screen_wake_on_song", True) and heard_new_song):
+                heard_new_song = heard > screen["off_at"]
+                if (minutes == 0 and not screen["hold_off"]) or (cfg.get("screen_wake_on_song", True) and heard_new_song):
                     if await loop.run_in_executor(None, set_screen_power, True):
-                        screen_on, idle_since = True, now
+                        _screen_set(True, now)
         except Exception as e:
             screen_status["manager"] = f"error: {type(e).__name__}: {e}"
             print(f"Screen manager error: {e}")
@@ -1051,7 +1103,26 @@ async def get_dashboard():
         "view": p["id"] if p else "",
         "radio_listen": bool(cfg.get("radio_listen", True) and shutil.which("ffmpeg")),
         "ambient": latest_ambient_state,
+        "screen": {"on": screen["on"], "changed": screen["changed"]},
     }
+
+@app.get("/api/screen")
+async def get_screen():
+    """Is the Pi's own screen on? (for Home Assistant)"""
+    return {"on": screen["on"], "changed": screen["changed"], "switched_off_by_hand": screen["hold_off"]}
+
+@app.post("/api/screen")
+async def set_screen(request: Request):
+    """Switch the Pi's own screen on or off: {"on": true|false}. Off stays off until a touch, a song or on."""
+    body = await request.json()
+    screen_request[0] = "on" if body.get("on") else "off"
+    if screen_wake is not None:
+        screen_wake.set()
+    for _ in range(40):                   # wait (up to 4 s) for the manager to do it
+        await asyncio.sleep(0.1)
+        if screen_request[0] is None:
+            break
+    return await get_screen()
 
 @app.post("/api/view")
 async def set_view(request: Request):
