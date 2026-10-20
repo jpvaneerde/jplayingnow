@@ -93,13 +93,12 @@ shazam = Shazam()
 
 DEFAULT_CONFIG = {
     "theme": "dark",
-    "display_mode": "grid",
     "screen_rotation": "normal",
     "mic_enabled": True,
     "mic_interval_seconds": 8,
     "input_device_index": 1,
     "sample_rate": 16000,
-    "hide_inactive_players": False,   # show a player only while it plays
+    "view_player": "",                # id of the player this display shows ("" = the first one)
     "screen_off_minutes": 0,          # 0 = never turn the local screen off
     "screen_wake_on_song": True,      # turn the screen back on when the ambient listener hears a song
     "spins_enabled": False,           # report plays to JPlay Spins (records.jplay.cloud)
@@ -233,9 +232,8 @@ def migrate_config(cfg):
         ]
     if not cfg.get("spins_room_player") and cfg.get("spins_room_moode"):
         cfg["spins_room_player"] = cfg["spins_room_moode"]
-    if "hide_inactive_moodes" in cfg and "hide_inactive_players" not in cfg:
-        cfg["hide_inactive_players"] = cfg["hide_inactive_moodes"]
-    for k in ("moodes", "spins_room_moode", "hide_inactive_moodes", "moode_proxy_port"):
+    for k in ("moodes", "spins_room_moode", "hide_inactive_moodes", "moode_proxy_port",
+              "display_mode", "hide_inactive_players"):
         cfg.pop(k, None)
     return cfg
 
@@ -838,7 +836,6 @@ async def save_settings(request: Request):
     cfg = load_config()
     
     cfg["theme"] = form.get("theme", "dark")
-    cfg["display_mode"] = form.get("display_mode", "grid")
     cfg["screen_rotation"] = form.get("screen_rotation", "normal")
     cfg["mic_enabled"] = form.get("mic_enabled") == "on"
     cfg["mic_interval_seconds"] = to_int(
@@ -857,7 +854,6 @@ async def save_settings(request: Request):
     hosts = form.getlist("player_host")
     ports = form.getlist("player_port")
     enabled_rows = set(form.getlist("player_enabled"))  # row indexes that are ticked
-    cfg["hide_inactive_players"] = form.get("hide_inactive_players") == "on"
     cfg["screen_off_minutes"] = to_int(form.get("screen_off_minutes"), 0, minimum=0, maximum=1440)
     cfg["screen_wake_on_song"] = form.get("screen_wake_on_song") == "on"
     cfg["radio_listen"] = form.get("radio_listen") == "on"
@@ -877,6 +873,10 @@ async def save_settings(request: Request):
             "enabled": str(i) in enabled_rows,
         })
     cfg["players"] = updated
+    # Which player this display shows: the form sends its row number (ids are renumbered above).
+    view_row = to_int(form.get("view_player_row"), -1)
+    kept = [i for i, h in enumerate(hosts) if h.strip()]
+    cfg["view_player"] = updated[kept.index(view_row)]["id"] if view_row in kept else (updated[0]["id"] if updated else "")
 
     cfg["spins_enabled"] = form.get("spins_enabled") == "on"
     cfg["spins_url"] = str(form.get("spins_url") or "").strip().rstrip("/") or DEFAULT_CONFIG["spins_url"]
@@ -1013,22 +1013,36 @@ async def api_players_status():
     """Raw player status and the radio listener's last result per player (for troubleshooting)."""
     return {"players": player_status, "radio_listener": radio.status, "ffmpeg": bool(shutil.which("ffmpeg"))}
 
+def view_player(cfg):
+    """The player this display shows: the chosen one, else the first enabled one."""
+    enabled = [p for p in cfg.get("players", []) if p.get("enabled", True) and p.get("host")]
+    return next((p for p in enabled if p["id"] == cfg.get("view_player")), enabled[0] if enabled else None)
+
 @app.get("/api/dashboard")
 async def get_dashboard():
     cfg = load_config()
     # Served from the background poller's cache, so the page never waits on a player
-    cards = [
-        player_cards[p["id"]]
-        for p in cfg.get("players", [])
-        if p.get("enabled", True) and p["id"] in player_cards
-    ]
-    if cfg.get("hide_inactive_players"):
-        cards = [c for c in cards if c.get("playing")]
+    p = view_player(cfg)
     return {
         "config": cfg,
-        "players": cards,
-        "ambient": latest_ambient_state
+        "player": player_cards.get(p["id"]) if p else None,
+        "players": [{"id": x["id"], "name": x["name"]} for x in cfg.get("players", []) if x.get("enabled", True)],
+        "view": p["id"] if p else "",
+        "radio_listen": bool(cfg.get("radio_listen", True) and shutil.which("ffmpeg")),
+        "ambient": latest_ambient_state,
     }
+
+@app.post("/api/view")
+async def set_view(request: Request):
+    """Switch the display to another player (from the menu on the display)."""
+    body = await request.json()
+    cfg = load_config()
+    wanted = str(body.get("player") or "")
+    if not any(p["id"] == wanted for p in cfg.get("players", [])):
+        return JSONResponse({"error": "Unknown player"}, status_code=404)
+    cfg["view_player"] = wanted
+    save_config(cfg)
+    return {"view": wanted}
 
 if __name__ == "__main__":
     import uvicorn

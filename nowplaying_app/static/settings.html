@@ -82,11 +82,6 @@
                 <option value="light" {% if config.theme == 'light' %}selected{% endif %}>Light</option>
                 <option value="retro" {% if config.theme == 'retro' %}selected{% endif %}>Retro Amber</option>
             </select>
-            <label>Display Mode</label>
-            <select name="display_mode">
-                <option value="grid" {% if config.display_mode == 'grid' %}selected{% endif %}>Grid View (Side-by-Side)</option>
-                <option value="focus" {% if config.display_mode == 'focus' %}selected{% endif %}>Focus Mode (Stacked)</option>
-            </select>
         </div>
 
         <div class="card">
@@ -118,17 +113,16 @@
         <div class="card">
             <h3>JPlay Players</h3>
             <p style="font-size: 0.85rem; color: #9ca3af; margin-top: 0;">
-                The players this display shows (address and port of the player's web page, usually 8080).
-                Tick a player to show it on the display.
+                Your JPlay players (address and port of the player's web page, usually 8080). The display shows
+                one of them, full screen: pick it with the round button (or later from the menu on the display).
+                While it's idle, the display shows what the microphone hears. Untick a player to leave it out.
             </p>
-            <label class="checkbox-label" style="margin-bottom: 12px;">
-                <input type="checkbox" name="hide_inactive_players" {% if config.hide_inactive_players %}checked{% endif %}>
-                Automatically hide players that are paused, stopped or offline (show again when playing)
-            </label>
             <div id="player-list">
+                {% set view = config.view_player or (config.players[0].id if config.players else '') %}
                 {% for p in config.players %}
                 <div class="row">
-                    <input type="checkbox" name="player_enabled" value="{{ loop.index0 }}" title="Show on display" style="width: 18px; flex: none;" {% if p.enabled is not defined or p.enabled %}checked{% endif %}>
+                    <input type="radio" name="view_player_row" value="{{ loop.index0 }}" title="Show this player on the display" style="width: 18px; flex: none;" {% if p.id == view %}checked{% endif %}>
+                    <input type="checkbox" name="player_enabled" value="{{ loop.index0 }}" title="Use this player" style="width: 18px; flex: none;" {% if p.enabled is not defined or p.enabled %}checked{% endif %}>
                     <input type="text" name="player_name" value="{{ p.name }}" placeholder="Name">
                     <input type="text" name="player_host" value="{{ p.host }}" placeholder="IP Address">
                     <input type="number" name="player_port" value="{{ p.port }}" style="width: 100px;">
@@ -198,7 +192,8 @@
             div.className = 'row';
             const idx = document.querySelectorAll('#player-list .row').length;
             div.innerHTML = `
-                <input type="checkbox" name="player_enabled" value="${idx}" title="Show on display" style="width: 18px; flex: none;" checked>
+                <input type="radio" name="view_player_row" value="${idx}" title="Show this player on the display" style="width: 18px; flex: none;">
+                <input type="checkbox" name="player_enabled" value="${idx}" title="Use this player" style="width: 18px; flex: none;" checked>
                 <input type="text" name="player_name" placeholder="Name">
                 <input type="text" name="player_host" placeholder="IP Address">
                 <input type="number" name="player_port" value="8080" style="width: 100px;">

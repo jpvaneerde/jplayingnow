@@ -1,11 +1,14 @@
 # jplayingnow
 
 JPlaying Now: a Raspberry Pi "now playing" display for the JPlay players
-([player-jplay](https://github.com/jpvaneerde/player-jplay)), plus an ambient listener. Each player gets a card with
-the song, the cover and the source (Radio, Plex, CD, Spotify or Bluetooth) in its own colour. When a radio station
-doesn't say which song it plays, JPlaying Now listens to the stream itself and recognises the song with Shazam. A USB
-microphone and Shazam recognise music from CDs and records. The web app (`nowplaying_app/server.py`, FastAPI) runs on
-port 5000; the Pi's own screen shows it in a Chromium kiosk. Tap a player's card to open that player's own page.
+([player-jplay](https://github.com/jpvaneerde/player-jplay)), plus an ambient listener. Each unit shows one player
+of your choice, full screen, laid out for its source (Radio, Plex, CD, Spotify or Bluetooth), each in its own colour:
+the song and its cover, with the station's logo small in the corner for radio, or just the station's logo when no
+song is known. When a radio station doesn't say which song it plays, JPlaying Now listens to the stream itself and
+recognises the song with Shazam. While the player is idle, the screen shows what the USB microphone hears (Shazam
+recognises CDs and records). The web app (`nowplaying_app/server.py`, FastAPI) runs on port 5000; the Pi's own screen
+shows it in a Chromium kiosk. The player's name next to **History** opens a menu: open the player's own page (also
+when it's idle), or switch the display to another player. Tapping the screen while it plays opens the player too.
 
 Settings (`/settings`) and play history (`/history`) are stored on the device in `nowplaying_app/config.json` and
 `nowplaying_app/data/history.db`. Git never overwrites them.
@@ -126,7 +129,8 @@ Open **http://192.168.1.225:5000/settings** on the PC:
    within a few seconds. If a red box appears, it says why (usually the Chromium path from step 7).
 2. **Ambient Listening:** select the USB microphone and keep the listener enabled. Put the microphone where it hears
    the speakers clearly, but not right against a speaker or the turntable.
-3. **JPlay Players:** add `Living Room`, `192.168.1.222`, `8080` and `Study`, `192.168.1.223`, `8080`. Keep
+3. **JPlay Players:** add `Living Room`, `192.168.1.222`, `8080` and `Study`, `192.168.1.223`, `8080`, and pick
+   the room's player with the round button: that's the one this display shows. Keep
    **Recognise songs on radio stations that don't name them** ticked (it needs `ffmpeg`, installed in step 3).
 4. Set rotation, theme and screen-off time to taste, then press **Save & Apply Settings**.
 
