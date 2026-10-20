@@ -4,10 +4,13 @@ A JPlay player (github.com/jpvaneerde/player-jplay) answers GET /api/v1/status w
 (radio, plex, cd, spotify, bluetooth) and a `now_playing` block that looks the same for every source.
 This module turns that into one card per player.
 
-Radio stations often send no song, only their own name. Then this module listens to the stream itself
-(ffmpeg records a few seconds, Shazam recognises it) and shows that song, marked as recognised.
+Radio stations often send no song, only their own name, or text that mixes the show into the song
+("Magasinet i P3 med …, spelar nu Dua Lipa - Training Season"). So this module listens to the stream itself
+(ffmpeg records a few seconds, Shazam recognises it) and prefers that song over the stream's text.
 """
 from __future__ import annotations
+
+import re
 
 import subprocess
 import time
@@ -44,6 +47,20 @@ def fetch_status(p: dict) -> dict | None:
         return r.json()
     except Exception:
         return None
+
+
+# Show text in front of the artist: "<show>, spelar nu <artist>", "<show> - now playing: <artist>", ...
+_NOW_PLAYING = re.compile(
+    r"^.*?\b(?:spelar nu|nu spelas|just nu|now playing|playing now|speelt nu|nu op|nu te horen|läuft gerade|jetzt läuft)\s*:?\s+",
+    re.I,
+)
+
+
+def clean_artist(artist: str) -> str:
+    """'Magasinet i P3 med Siri Fagerudd, spelar nu Dua Lipa' -> 'Dua Lipa'."""
+    a = (artist or "").strip()
+    cleaned = _NOW_PLAYING.sub("", a).strip(" ,-:")
+    return cleaned or a
 
 
 def has_song(source: str, np: dict) -> bool:
@@ -144,11 +161,15 @@ def make_card(p: dict, status: dict | None, recognised: dict | None, online_info
     if source == "radio":
         station = x.get("station") or album or title
         card.update(station=station, station_logo=cover, album="")
-        if known:
+        artist = clean_artist(artist)
+        # The song recognised from the stream wins, unless the stream named a new song since then.
+        use_recognised = bool(recognised and recognised.get("station") == station
+                              and (not known or recognised.get("icy") == icy_signature(np)))
+        if known and not use_recognised:
             info = online_info(artist, title)
             card.update(title=title, artist=artist, album=info.get("album", ""), year=info.get("year", ""),
                         genre=info.get("genre", "") or x.get("genre", ""), coverart=_real_art(info) or cover)
-        elif recognised and recognised.get("station") == station:
+        elif use_recognised:
             card.update(title=recognised["title"], artist=recognised["artist"], album=recognised.get("album", ""),
                         year=recognised.get("year", ""), genre=recognised.get("genre", ""),
                         coverart=recognised.get("cover") or cover, recognised=True)
@@ -182,6 +203,11 @@ def _real_art(info: dict) -> str:
     return art if art.startswith("http") else ""
 
 
+def icy_signature(np: dict) -> str:
+    """What the stream itself said at a moment (to notice when it names a new song)."""
+    return f"{np.get('artist') or ''}|{np.get('title') or ''}"
+
+
 def spins_room_data(card: dict) -> dict:
     """This room's player for JPlay Spins: state, source, station and the song (if known)."""
     if not card.get("online"):
@@ -201,12 +227,14 @@ def spins_room_data(card: dict) -> dict:
 
 
 def needs_listening(card: dict, status: dict | None) -> str:
-    """The stream address to listen to, when this player plays radio without naming the song."""
+    """The stream address to listen to while this player plays radio.
+
+    Always, not only when the station names no song: what stations send is often wrong or mixed with
+    the show's name, and the recognised song is preferred.
+    """
     if not status or status.get("active") != "radio" or not card.get("playing"):
         return ""
     np = status.get("now_playing") or {}
-    if has_song("radio", np):
-        return ""
     return str((np.get("extra") or {}).get("stream_url") or "")
 
 
@@ -230,6 +258,7 @@ class RadioListener:
         self.songs: dict[str, dict] = {}       # player id -> recognised song
         self.next_try: dict[str, float] = {}
         self.status: dict[str, str] = {}       # player id -> last result, for troubleshooting
+        self.last_icy: dict[str, str] = {}     # player id -> what the stream last said
 
     def due(self, player_id: str, now: float) -> bool:
         return now >= self.next_try.get(player_id, 0)
@@ -243,16 +272,22 @@ class RadioListener:
             return None
         return s
 
-    def heard(self, player_id: str, station: str, song: dict, now: float):
+    def heard(self, player_id: str, station: str, song: dict, now: float, icy: str = ""):
         prev = self.songs.get(player_id)
         same = prev and prev["station"] == station and prev["title"].lower() == song["title"].lower()
-        self.songs[player_id] = {**song, "station": station, "heard": now, "since": prev["since"] if same else now}
+        self.songs[player_id] = {**song, "station": station, "icy": icy, "heard": now, "since": prev["since"] if same else now}
         self.next_try[player_id] = now + LISTEN_EVERY_AFTER_HIT
         self.status[player_id] = f"recognised {song['artist']} – {song['title']}"
 
     def missed(self, player_id: str, now: float, why: str):
         self.next_try[player_id] = now + LISTEN_EVERY
         self.status[player_id] = why
+
+    def stream_changed(self, player_id: str, icy: str, now: float):
+        """The stream named something new (a new song, probably): listen again soon."""
+        if self.last_icy.get(player_id) != icy:
+            self.last_icy[player_id] = icy
+            self.next_try[player_id] = min(self.next_try.get(player_id, 0), now + 10)
 
     def forget(self, player_id: str):
         self.songs.pop(player_id, None)

@@ -132,11 +132,12 @@
             <button type="button" class="btn btn-add" onclick="addPlayerRow()">+ Add JPlay Player</button>
             <label class="checkbox-label" style="margin-top: 16px;">
                 <input type="checkbox" name="radio_listen" {% if config.radio_listen %}checked{% endif %}>
-                Recognise songs on radio stations that don't name them
+                Recognise radio songs from the stream
             </label>
             <p style="font-size: 0.8rem; color: #9ca3af; margin: 6px 0 0;">
-                While a player plays a station that only sends its own name, this unit listens to the stream
-                (10 seconds every half minute) and shows the song it recognises. Needs ffmpeg.
+                While a player plays the radio, this unit listens to the stream (10 seconds every half minute, and
+                when the station names a new song) and recognises the song. That beats what many stations send:
+                only their own name, or the show mixed into the artist. Needs ffmpeg.
             </p>
         </div>
 

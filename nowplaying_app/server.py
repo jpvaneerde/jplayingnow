@@ -506,6 +506,9 @@ async def background_radio_listener():
                     if card.get("source") != "radio":
                         radio.forget(pid)
                     continue
+                np = (player_status.get(pid) or {}).get("now_playing") or {}
+                icy = players.icy_signature(np)
+                radio.stream_changed(pid, icy, now)
                 if not radio.due(pid, now):
                     continue
                 station = card.get("station", "")
@@ -520,7 +523,7 @@ async def background_radio_listener():
                     song["year"] = song["year"] or info["year"]
                     song["album"] = song["album"] or info["album"]
                     song["genre"] = song["genre"] or info["genre"]
-                    radio.heard(pid, station, song, time.time())   # the next poll (2 s) shows it
+                    radio.heard(pid, station, song, time.time(), icy)   # the next poll (2 s) shows it
                 else:
                     radio.missed(pid, time.time(), "no song recognised (talk, ads or unknown music)")
         except Exception as e:
