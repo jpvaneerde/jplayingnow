@@ -289,12 +289,14 @@
                 const key = t.key;
                 const q = new URLSearchParams({ artist: t.artist || '', title: t.title || '', album: t.album || '' });
                 if (t.duration) q.set('duration', t.duration);
-                fetch('/api/lyrics?' + q).then(r => r.json()).then(d => {
+                const ask = () => fetch('/api/lyrics?' + q).then(r => r.json()).then(d => {
                     if (lyr.key !== key) return;            // the song changed meanwhile
+                    if (d.unavailable) { setTimeout(() => lyr.key === key && ask(), 60000); return; }   // LRCLIB busy: again in a minute
                     lyr.data = d;
                     lastHtml = null;                         // redraw with the lyrics
                     update();
-                }).catch(() => {});
+                }).catch(() => setTimeout(() => lyr.key === key && ask(), 60000));
+                ask();
             }
             lyr.dur = t.duration || lyr.dur;
             if (t.position != null) {

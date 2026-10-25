@@ -29,10 +29,12 @@ NOT_FOUND = {"found": False, "instrumental": False, "synced": None, "plain": Non
 
 _db_path: str | None = None
 _lock = threading.Lock()
+_failed: dict[str, float] = {}     # song -> when LRCLIB last failed for it (memory only, never stored)
+RETRY_FAILED_AFTER = 45            # seconds
 
 
 # Raised whenever the matching gets better: songs not found with an older version are looked up again.
-MATCHER_VERSION = 3
+MATCHER_VERSION = 6
 
 
 def init(path: str) -> None:
@@ -41,7 +43,8 @@ def init(path: str) -> None:
     with _connect() as db:
         db.execute("CREATE TABLE IF NOT EXISTS lyrics (key TEXT PRIMARY KEY, answer TEXT, found INTEGER, fetched_at REAL)")
         if db.execute("PRAGMA user_version").fetchone()[0] < MATCHER_VERSION:
-            db.execute("DELETE FROM lyrics WHERE found = 0")
+            # misses, and answers "instrumental" (stored as found by older versions)
+            db.execute("""DELETE FROM lyrics WHERE found = 0 OR answer LIKE '%"found": false%'""")
             db.execute(f"PRAGMA user_version = {MATCHER_VERSION}")
 
 
@@ -120,7 +123,7 @@ def _answer(rec: dict) -> dict:
 def _by_length(rec: dict, artist: str, album: str, duration: float | None) -> float | None:
     """For a song whose title is written differently (Japanese script vs romaji or English): the same artist
     (or album) and the same length to within 2 seconds. None = not this song."""
-    if not duration or not rec.get("duration"):
+    if not duration or not rec.get("duration") or not (rec.get("syncedLyrics") or rec.get("plainLyrics")):
         return None
     diff = abs(float(rec["duration"]) - duration)
     if diff > 2:
@@ -141,7 +144,9 @@ def _by_length(rec: dict, artist: str, album: str, duration: float | None) -> fl
 
 
 def _score(rec: dict, artist: str, title: str, duration: float | None) -> float | None:
-    """How well an LRCLIB entry fits the song; None = not this song."""
+    """How well an LRCLIB entry fits the song; None = not this song (or no lyrics in it)."""
+    if not (rec.get("syncedLyrics") or rec.get("plainLyrics")):
+        return None
     if norm(rec.get("trackName")) != norm(title):
         return None
     want, have = norm(main_artist(artist)), norm(rec.get("artistName"))
@@ -163,27 +168,48 @@ def _score(rec: dict, artist: str, title: str, duration: float | None) -> float 
 
 
 # ---------------------------------------------------------------- lookup
+class Unavailable(Exception):
+    """LRCLIB didn't answer (overloaded, down): not the same as 'no lyrics', so nothing is stored."""
+
+
+def _ask(session, endpoint: str, params: dict, problems: list):
+    """One LRCLIB request, tried twice. A 404 answers None; a failure is noted in problems and answers None too."""
+    for attempt in (1, 2):
+        try:
+            r = session.get(f"{API}/{endpoint}", headers=HEADERS, timeout=8, params=params)
+            if r.status_code == 404:
+                return None
+            if r.status_code == 200:
+                data = r.json()
+                if endpoint == "search" and not isinstance(data, list):
+                    raise ValueError(f"unexpected answer: {str(data)[:100]}")
+                return data
+            raise RuntimeError(f"HTTP {r.status_code}")
+        except Exception as e:  # 503 when LRCLIB is busy, timeouts, odd answers
+            if attempt == 2:
+                problems.append(f"{endpoint} {params}: {type(e).__name__}: {e}")
+                return None
+            time.sleep(1.5)
+
+
 def fetch(artist: str, title: str, album: str = "", duration: float | None = None, session=requests) -> dict:
-    """Ask LRCLIB (no cache)."""
+    """Ask LRCLIB (no cache). Raises Unavailable when nothing was found and some requests failed."""
+    instrumental = False
+    problems: list[str] = []
     # 1. The exact recording, when the length is known.
     if duration and album:
-        r = session.get(f"{API}/get", headers=HEADERS, timeout=8, params={
-            "artist_name": artist, "track_name": title, "album_name": album, "duration": round(duration)})
-        if r.status_code == 200:
-            ans = _answer(r.json())
-            if ans["found"] or ans["instrumental"]:
+        rec = _ask(session, "get", {"artist_name": artist, "track_name": title, "album_name": album,
+                                    "duration": round(duration)}, problems)
+        if rec:
+            ans = _answer(rec)
+            if ans["found"]:
                 return ans
-        elif r.status_code != 404:
-            r.raise_for_status()
+            # An entry without lyrics (marked instrumental, or empty): look further, another entry may have them.
+            instrumental = ans["instrumental"]
     # 2. Search by title and artist, and pick the best fit.
     best, best_score = None, None
     for t in title_variants(title):
-        r = session.get(f"{API}/search", headers=HEADERS, timeout=8,
-                        params={"track_name": t, "artist_name": main_artist(artist)})
-        if r.status_code == 404:
-            continue
-        r.raise_for_status()
-        for rec in r.json() or []:
+        for rec in _ask(session, "search", {"track_name": t, "artist_name": main_artist(artist)}, problems) or []:
             s = _score(rec, artist, title, duration)
             if s is not None and (best_score is None or s > best_score):
                 best, best_score = rec, s
@@ -195,11 +221,7 @@ def fetch(artist: str, title: str, album: str = "", duration: float | None = Non
         a = main_artist(artist)
         queries = [f"{a} {title_variants(title)[-1]}", f"{a} {album}".strip() if album else "", a]
         for q in dict.fromkeys(filter(None, queries)):
-            r = session.get(f"{API}/search", headers=HEADERS, timeout=8, params={"q": q})
-            if r.status_code == 404:
-                continue
-            r.raise_for_status()
-            for rec in r.json() or []:
+            for rec in _ask(session, "search", {"q": q}, problems) or []:
                 s = _score(rec, artist, title, duration)
                 if s is None:
                     s = _by_length(rec, artist, album, duration)
@@ -207,7 +229,11 @@ def fetch(artist: str, title: str, album: str = "", duration: float | None = Non
                     best, best_score = rec, s
             if best is not None:
                 break
-    return _answer(best) if best else dict(NOT_FOUND)
+    if best:
+        return _answer(best)
+    if problems:
+        raise Unavailable("; ".join(problems[:3]))
+    return {**NOT_FOUND, "instrumental": instrumental}
 
 
 def from_records(url: str, token: str, artist: str, title: str, album: str = "", duration: float | None = None,
@@ -216,7 +242,7 @@ def from_records(url: str, token: str, artist: str, title: str, album: str = "",
     params = {"artist": artist, "title": title, "album": album or ""}
     if duration:
         params["duration"] = round(duration)
-    r = session.get(url.rstrip("/") + "/api/lyrics", params=params, timeout=12,
+    r = session.get(url.rstrip("/") + "/api/lyrics", params=params, timeout=45,
                     headers={**HEADERS, "Authorization": f"Bearer {token}"})
     r.raise_for_status()
     ans = r.json()
@@ -229,14 +255,15 @@ def _store(key: str, ans: dict) -> None:
     if _db_path:
         with _lock, _connect() as db:
             db.execute("INSERT OR REPLACE INTO lyrics VALUES (?, ?, ?, ?)",
-                       (key, json.dumps(ans), int(ans["found"] or ans["instrumental"]), time.time()))
+                       (key, json.dumps(ans), int(ans["found"]), time.time()))
 
 
 def lookup(artist: str, title: str, album: str = "", duration: float | None = None,
            records: tuple[str, str] | None = None) -> dict:
     """Lyrics for a song. records = (JPlay Records address, listener token) when JPlay Spins is set up.
 
-    Never raises: a failure is 'not found' (asked again later).
+    Never raises. When LRCLIB couldn't be asked, the answer has "unavailable": True (nothing is stored) and the
+    display asks again a minute later.
     """
     if not artist or not title:
         return dict(NOT_FOUND)
@@ -255,14 +282,16 @@ def lookup(artist: str, title: str, album: str = "", duration: float | None = No
                 row = db.execute("SELECT answer, found, fetched_at FROM lyrics WHERE key = ?", (key,)).fetchone()
             if row and (row[1] or time.time() - row[2] < RETRY_MISS_AFTER):
                 return json.loads(row[0])
+    if time.time() - _failed.get(key, 0) < RETRY_FAILED_AFTER:
+        return {**NOT_FOUND, "unavailable": True}
     try:
         ans = fetch(artist, title, album, duration)
-    except Exception as e:  # LRCLIB unreachable: try again in an hour, not in 3 days
+    except Exception as e:  # LRCLIB busy or unreachable: not stored; the display asks again in a minute
         print(f"Lyrics lookup failed for {artist} – {title}: {type(e).__name__}: {e}")
-        if _db_path:
-            with _lock, _connect() as db:
-                db.execute("INSERT OR REPLACE INTO lyrics VALUES (?, ?, 0, ?)",
-                           (key, json.dumps(NOT_FOUND), time.time() - RETRY_MISS_AFTER + 3600))
-        return dict(NOT_FOUND)
+        _failed[key] = time.time()
+        if len(_failed) > 500:
+            _failed.clear()
+        return {**NOT_FOUND, "unavailable": True}
+    _failed.pop(key, None)
     _store(key, ans)
     return ans
