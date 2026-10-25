@@ -1,8 +1,13 @@
-"""Song lyrics from LRCLIB (lrclib.net): free, no account. Many songs have *synced* lyrics there (a time per
-line, the LRC format), others only the text.
+"""Song lyrics. Many songs have *synced* lyrics (a time per line, the LRC format), others only the text.
 
-lookup() answers {"found", "instrumental", "synced": [[seconds, line], ...] | None, "plain": [line, ...] | None}.
-Answers are kept in data/lyrics.db, misses too (asked again after a few days), so each song is fetched once.
+Where they come from, in order:
+1. JPlay Records (the JPlay Spins address and token from Settings): the lyrics store for the whole house. It
+   looks songs up on LRCLIB itself and keeps them, with corrections (a song's timing) made there.
+2. When JPlay Records isn't set up or can't be reached: this unit's own copy (data/lyrics.db), then LRCLIB
+   (lrclib.net: free, no account) directly.
+
+lookup() answers {"found", "instrumental", "synced": [[seconds, line], ...] | None, "plain": [line, ...] | None,
+"offset"}: offset (seconds) is the song's timing correction, added to the position before picking the line.
 """
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ HEADERS = {"User-Agent": "JPlayingNow (https://github.com/jpvaneerde/jplayingnow
 RETRY_MISS_AFTER = 3 * 86400       # a song without lyrics is asked again after 3 days
 DURATION_SLACK = 4                 # seconds: same recording if the lengths differ by at most this
 
-NOT_FOUND = {"found": False, "instrumental": False, "synced": None, "plain": None}
+NOT_FOUND = {"found": False, "instrumental": False, "synced": None, "plain": None, "offset": 0}
 
 _db_path: str | None = None
 _lock = threading.Lock()
@@ -82,7 +87,7 @@ def _answer(rec: dict) -> dict:
     if plain is None and synced:
         plain = [line for _, line in synced]
     return {"found": bool(synced or plain), "instrumental": bool(rec.get("instrumental")),
-            "synced": synced, "plain": plain}
+            "synced": synced, "plain": plain, "offset": 0}
 
 
 def _score(rec: dict, artist: str, title: str, duration: float | None) -> float | None:
@@ -137,11 +142,45 @@ def fetch(artist: str, title: str, album: str = "", duration: float | None = Non
     return _answer(best) if best else dict(NOT_FOUND)
 
 
-def lookup(artist: str, title: str, album: str = "", duration: float | None = None) -> dict:
-    """Lyrics for a song, from the cache or LRCLIB. Never raises: a failure is 'not found' (asked again later)."""
+def from_records(url: str, token: str, artist: str, title: str, album: str = "", duration: float | None = None,
+                 session=requests) -> dict:
+    """Ask JPlay Records (raises when it can't answer)."""
+    params = {"artist": artist, "title": title, "album": album or ""}
+    if duration:
+        params["duration"] = round(duration)
+    r = session.get(url.rstrip("/") + "/api/lyrics", params=params, timeout=12,
+                    headers={**HEADERS, "Authorization": f"Bearer {token}"})
+    r.raise_for_status()
+    ans = r.json()
+    return {"found": bool(ans.get("found")), "instrumental": bool(ans.get("instrumental")),
+            "synced": ans.get("synced") or None, "plain": ans.get("plain") or None,
+            "offset": float(ans.get("offset") or 0)}
+
+
+def _store(key: str, ans: dict) -> None:
+    if _db_path:
+        with _lock, _connect() as db:
+            db.execute("INSERT OR REPLACE INTO lyrics VALUES (?, ?, ?, ?)",
+                       (key, json.dumps(ans), int(ans["found"] or ans["instrumental"]), time.time()))
+
+
+def lookup(artist: str, title: str, album: str = "", duration: float | None = None,
+           records: tuple[str, str] | None = None) -> dict:
+    """Lyrics for a song. records = (JPlay Records address, listener token) when JPlay Spins is set up.
+
+    Never raises: a failure is 'not found' (asked again later).
+    """
     if not artist or not title:
         return dict(NOT_FOUND)
     key = cache_key(artist, title)
+    if records:
+        # Always ask JPlay Records first, so a correction made there shows up; keep a copy for when it's away.
+        try:
+            ans = from_records(records[0], records[1], artist, title, album, duration)
+            _store(key, ans)
+            return ans
+        except Exception as e:
+            print(f"Lyrics: JPlay Records didn't answer ({type(e).__name__}: {e}); using this unit's copy or LRCLIB")
     with _lock:
         if _db_path:
             with _connect() as db:
@@ -157,8 +196,5 @@ def lookup(artist: str, title: str, album: str = "", duration: float | None = No
                 db.execute("INSERT OR REPLACE INTO lyrics VALUES (?, ?, 0, ?)",
                            (key, json.dumps(NOT_FOUND), time.time() - RETRY_MISS_AFTER + 3600))
         return dict(NOT_FOUND)
-    if _db_path:
-        with _lock, _connect() as db:
-            db.execute("INSERT OR REPLACE INTO lyrics VALUES (?, ?, ?, ?)",
-                       (key, json.dumps(ans), int(ans["found"] or ans["instrumental"]), time.time()))
+    _store(key, ans)
     return ans

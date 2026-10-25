@@ -321,7 +321,7 @@
         function lyricsTick() {
             const box = panel.querySelector('.lyrics'), track = box && box.querySelector('.track');
             if (!track) return;
-            const pos = lyricsPos();
+            const pos = lyricsPos() + (lyr.data?.offset || 0);   // the song's timing correction (JPlay Records)
             const lines = track.children;
             if (box.classList.contains('synced')) {
                 const times = lyr.data.synced;

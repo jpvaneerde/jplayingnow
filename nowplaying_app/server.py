@@ -1172,7 +1172,11 @@ def lyrics_track(cfg, card, now):
 @app.get("/api/lyrics")
 async def get_lyrics(artist: str = "", title: str = "", album: str = "", duration: float | None = None):
     """The lyrics of a song (LRCLIB, cached on the Pi): synced lines with times, or the plain text."""
-    return await asyncio.get_running_loop().run_in_executor(None, lyrics.lookup, artist, title, album, duration)
+    cfg = load_config()
+    # JPlay Records keeps the lyrics for the whole house (same address and token as JPlay Spins)
+    records = (cfg["spins_url"], cfg["spins_token"]) if spins.enabled(cfg) else None
+    return await asyncio.get_running_loop().run_in_executor(
+        None, lambda: lyrics.lookup(artist, title, album, duration, records))
 
 @app.get("/api/screen")
 async def get_screen():
