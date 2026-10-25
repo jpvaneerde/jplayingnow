@@ -44,12 +44,24 @@ def _connect() -> sqlite3.Connection:
 
 # ---------------------------------------------------------------- matching helpers
 def norm(s: str) -> str:
-    """'Purple Rain (2015 Remaster)' -> 'purple rain'; accents, brackets and punctuation ignored."""
-    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
+    """'Purple Rain (2015 Remaster)' -> 'purple rain', 'Björk' -> 'bjork', '分かってないよ' stays.
+
+    Accents, brackets and punctuation are ignored; letters of every script (Japanese, Korean, Cyrillic...) are kept.
+    Full-width characters become ordinary ones, so 'ＴＥＳＴ（Live）' and 'TEST (Live)' compare equal.
+    """
+    s = unicodedata.normalize("NFKD", str(s or ""))
+    out, base = [], ""
+    for c in s:
+        if unicodedata.combining(c) and base and base < "\u0250":   # an accent on a Latin letter: drop it
+            continue
+        out.append(c)
+        if not unicodedata.combining(c):
+            base = c
+    s = unicodedata.normalize("NFC", "".join(out)).lower()        # が, 방 etc. put back together
     s = re.sub(r"\(.*?\)|\[.*?\]", " ", s)
     s = re.sub(r"\s+-\s+.*$", "", s)                     # "Song - Radio Edit" / "- 2011 Remaster"
     s = re.sub(r"\b(feat|ft|featuring)\b.*$", "", s)
-    s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = re.sub(r"[\W_]+", " ", s)                         # \W: anything that isn't a letter or digit, in any script
     return s.strip()
 
 
@@ -88,6 +100,29 @@ def _answer(rec: dict) -> dict:
         plain = [line for _, line in synced]
     return {"found": bool(synced or plain), "instrumental": bool(rec.get("instrumental")),
             "synced": synced, "plain": plain, "offset": 0}
+
+
+def _by_length(rec: dict, artist: str, album: str, duration: float | None) -> float | None:
+    """For a song whose title is written differently (Japanese script vs romaji or English): the same artist
+    (or album) and the same length to within 2 seconds. None = not this song."""
+    if not duration or not rec.get("duration"):
+        return None
+    diff = abs(float(rec["duration"]) - duration)
+    if diff > 2:
+        return None
+    want, have = norm(main_artist(artist)), norm(rec.get("artistName"))
+    same_artist = bool(want) and (want in have or have in want)
+    same_album = bool(norm(album)) and norm(album) == norm(rec.get("albumName"))
+    if not (same_artist or same_album):
+        return None
+    score = -diff * 3
+    if rec.get("syncedLyrics"):
+        score += 10
+    elif rec.get("plainLyrics"):
+        score += 3
+    if rec.get("instrumental"):
+        score -= 5
+    return score
 
 
 def _score(rec: dict, artist: str, title: str, duration: float | None) -> float | None:
@@ -139,6 +174,20 @@ def fetch(artist: str, title: str, album: str = "", duration: float | None = Non
                 best, best_score = rec, s
         if best is not None:
             break
+    if best is None and duration:
+        # 3. The title is written differently on LRCLIB (Japanese script vs romaji or English...): all songs by
+        #    this artist (and on this album), and the one with the same length.
+        for q in dict.fromkeys(filter(None, [f"{main_artist(artist)} {album}".strip(), main_artist(artist)])):
+            r = session.get(f"{API}/search", headers=HEADERS, timeout=8, params={"q": q})
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            for rec in r.json() or []:
+                s = _by_length(rec, artist, album, duration)
+                if s is not None and (best_score is None or s > best_score):
+                    best, best_score = rec, s
+            if best is not None:
+                break
     return _answer(best) if best else dict(NOT_FOUND)
 
 
