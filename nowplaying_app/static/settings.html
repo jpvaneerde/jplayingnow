@@ -142,6 +142,25 @@
         </div>
 
         <div class="card">
+            <h3>Lyrics</h3>
+            <label class="checkbox-label">
+                <input type="checkbox" name="lyrics_enabled" {% if config.lyrics_enabled %}checked{% endif %}>
+                Show the lyrics
+            </label>
+            <p style="font-size: 0.8rem; color: #9ca3af; margin: 6px 0 12px;">
+                From LRCLIB (lrclib.net). When the lyrics have times, the line being sung is highlighted and the text
+                follows the music; otherwise it scrolls slowly through the song. Songs without lyrics look as before.
+            </p>
+            <label for="lyrics_offset_seconds">Lyrics timing (seconds)</label>
+            <input type="number" id="lyrics_offset_seconds" name="lyrics_offset_seconds" step="0.5" min="-30" max="30"
+                   value="{{ config.lyrics_offset_seconds or 0 }}" style="width: 120px;">
+            <p style="font-size: 0.8rem; color: #9ca3af; margin: 6px 0 0;">
+                If the highlighted line runs ahead of the singing, lower this (e.g. -1.5); if it lags, raise it.
+                Mostly needed for radio and records, where the place in the song comes from recognising it.
+            </p>
+        </div>
+
+        <div class="card">
             <h3>JPlay Spins</h3>
             <p style="font-size: 0.85rem; color: #9ca3af; margin-top: 0;">
                 Reports what this room hears and plays to JPlay Records, which keeps one history for all rooms

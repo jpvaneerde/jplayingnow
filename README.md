@@ -11,6 +11,12 @@ recognises CDs and records). The web app (`nowplaying_app/server.py`, FastAPI) r
 shows it in a Chromium kiosk. The player's name next to **History** opens a menu: open the player's own page (also
 when it's idle), or switch the display to another player. Tapping the screen while it plays opens the player too.
 
+**Lyrics** (from LRCLIB, lrclib.net) appear under the title when a song has them. With timed lyrics, the line being
+sung is highlighted and glides up with the music: exactly in time for Plex, CD and Spotify, and for radio and records
+from where Shazam recognised the song (Settings → Lyrics → timing nudges them if they run early or late). Without
+times, the text scrolls slowly through the song. Lyrics are kept in `nowplaying_app/data/lyrics.db`, so each song is
+looked up once.
+
 The screen switches off after the minutes set in Settings without music, and back on for a new song or a touch (the
 touch that wakes it does nothing else). Home Assistant can show and control each unit (screen on/off, which player
 it shows, what it hears): see the JPlay integration in

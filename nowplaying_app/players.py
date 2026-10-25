@@ -168,11 +168,15 @@ def make_card(p: dict, status: dict | None, recognised: dict | None, online_info
         if known and not use_recognised:
             info = online_info(artist, title)
             card.update(title=title, artist=artist, album=info.get("album", ""), year=info.get("year", ""),
-                        genre=info.get("genre", "") or x.get("genre", ""), coverart=_real_art(info) or cover)
+                        genre=info.get("genre", "") or x.get("genre", ""), coverart=_real_art(info) or cover,
+                        song_duration=info.get("duration"))
         elif use_recognised:
             card.update(title=recognised["title"], artist=recognised["artist"], album=recognised.get("album", ""),
                         year=recognised.get("year", ""), genre=recognised.get("genre", ""),
-                        coverart=recognised.get("cover") or cover, recognised=True)
+                        coverart=recognised.get("cover") or cover, recognised=True,
+                        # where in the song the recording started, and when (for the lyrics)
+                        heard_offset=recognised.get("offset"), heard_at=recognised.get("rec_start"),
+                        song_duration=recognised.get("duration"))
             known = True
         else:
             # No song yet: the station itself. A show name or slogan from the stream goes underneath.

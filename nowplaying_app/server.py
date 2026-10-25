@@ -40,6 +40,7 @@ try:
     from shazamio import Shazam
     import history
     import players
+    import lyrics
     import spins
     import touchwake
 except Exception:
@@ -61,6 +62,8 @@ async def lifespan(app: FastAPI):
     history.rename_source("Ambient Listener (CD)", MIC_SOURCE_NAME)
     history.purge_other_sources(MIC_SOURCE_NAME)   # history holds mic-detected songs only
     spins.init(HISTORY_DB)                          # JPlay Spins outbox lives next to the history
+    os.makedirs(DATA_DIR, exist_ok=True)
+    lyrics.init(os.path.join(DATA_DIR, "lyrics.db"))  # lyrics already looked up
     tasks = [
         asyncio.create_task(background_mic_listener()),
         asyncio.create_task(background_player_poller()),
@@ -107,6 +110,8 @@ DEFAULT_CONFIG = {
     "spins_token": "",                # listener token from JPlay Records → Settings → Listeners
     "spins_room_player": "",          # host of the JPlay player in this room ("" = none)
     "radio_listen": True,             # recognise songs on radio stations that don't name them (listens to the stream)
+    "lyrics_enabled": True,           # show the song's lyrics (LRCLIB), in time with the music when possible
+    "lyrics_offset_seconds": 0,       # move the lyrics earlier (-) or later (+) if they run ahead or behind
     "players": []                     # JPlay players: {id, name, host, port, enabled}
 }
 
@@ -314,7 +319,7 @@ def pick_best_match(results, artist, title):
 
 def fetch_online_info(artist, title):
     """Return dict(art, year, album, genre) from iTunes. Cached per track."""
-    default = {"art": "/static/default_cover.png", "year": "", "album": "", "genre": ""}
+    default = {"art": "/static/default_cover.png", "year": "", "album": "", "genre": "", "duration": None}
     if not title or title in ["Idle", "Unknown Track", "Offline"]:
         return default
     key = (artist, title)
@@ -335,6 +340,7 @@ def fetch_online_info(artist, title):
                 "year": extract_year(r.get("releaseDate")),
                 "album": r.get("collectionName", ""),
                 "genre": r.get("primaryGenreName", ""),
+                "duration": round(r["trackTimeMillis"] / 1000) if r.get("trackTimeMillis") else None,
             }
             if len(_itunes_cache) > 200:
                 _itunes_cache.clear()
@@ -475,7 +481,7 @@ async def background_player_poller():
                 else:
                     paused_since.pop(c["id"], None)
             player_cards = {
-                c["id"]: {**c, "hidden": bool(p.get("hidden")),
+                c["id"]: {**c, "hidden": bool(p.get("hidden")), "polled_at": now,
                           # Worth showing: playing, or paused only a little while. Otherwise the display shows the listener.
                           "show": c["playing"] or (c["state"] == "paused" and now - paused_since[c["id"]] < SHOW_PAUSED_SECONDS)}
                 for p, c in zip(ps, cards)
@@ -516,6 +522,7 @@ async def background_radio_listener():
                     continue
                 station = card.get("station", "")
                 try:
+                    rec_start = time.time()
                     audio = await loop.run_in_executor(None, players.record_stream, url)
                     song = parse_shazam(await shazam.recognize(audio))
                 except Exception as e:
@@ -526,6 +533,8 @@ async def background_radio_listener():
                     song["year"] = song["year"] or info["year"]
                     song["album"] = song["album"] or info["album"]
                     song["genre"] = song["genre"] or info["genre"]
+                    song["duration"] = info.get("duration")
+                    song["rec_start"] = rec_start        # with song["offset"]: where in the song we are (lyrics)
                     radio.heard(pid, station, song, time.time(), icy)   # the next poll (2 s) shows it
                 else:
                     radio.missed(pid, time.time(), "no song recognised (talk, ads or unknown music)")
@@ -555,7 +564,15 @@ def parse_shazam(out):
         "cover": images.get("coverarthq") or images.get("coverart") or "",
         "key": track.get("key", ""),
         "isrc": track.get("isrc", ""),
+        "offset": shazam_offset(out),
     }
+
+def shazam_offset(out):
+    """How far into the song (seconds) the recording started, as Shazam matched it; None if unknown."""
+    try:
+        return float(((out or {}).get("matches") or [{}])[0]["offset"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
 
 MIN_PLAY_SECONDS = 20          # a song must be heard this long before it enters history
 MIC_SOURCE_NAME = "Ambient Listener"
@@ -587,6 +604,7 @@ async def background_mic_listener():
             try:
                 loop = asyncio.get_event_loop()
                 duration = cfg.get("mic_interval_seconds", 8)
+                rec_start = time.time()
                 audio_bytes = await loop.run_in_executor(None, record_audio, duration)
 
                 out = await shazam.recognize(audio_bytes)
@@ -617,7 +635,11 @@ async def background_mic_listener():
                         "year": year,
                         "album": shazam_album or info["album"],
                         "genre": track.get("genres", {}).get("primary") or info["genre"],
-                        "coverart": cover
+                        "coverart": cover,
+                        # Where in the song we are (for the lyrics): offset at the moment the recording started
+                        "offset": shazam_offset(out),
+                        "heard_at": rec_start,
+                        "duration": info.get("duration"),
                     }
                     # Only log once the same song has been heard for MIN_PLAY_SECONDS
                     s = latest_ambient_state
@@ -930,6 +952,11 @@ async def save_settings(request: Request):
     cfg["screen_off_minutes"] = to_int(form.get("screen_off_minutes"), 0, minimum=0, maximum=1440)
     cfg["screen_wake_on_song"] = form.get("screen_wake_on_song") == "on"
     cfg["radio_listen"] = form.get("radio_listen") == "on"
+    cfg["lyrics_enabled"] = form.get("lyrics_enabled") == "on"
+    try:
+        cfg["lyrics_offset_seconds"] = max(-30.0, min(30.0, float(form.get("lyrics_offset_seconds") or 0)))
+    except ValueError:
+        cfg["lyrics_offset_seconds"] = 0
 
     updated = []
     for i, host in enumerate(hosts):
@@ -1104,7 +1131,48 @@ async def get_dashboard():
         "radio_listen": bool(cfg.get("radio_listen", True) and shutil.which("ffmpeg")),
         "ambient": latest_ambient_state,
         "screen": {"on": screen["on"], "changed": screen["changed"]},
+        "lyrics": lyrics_track(cfg, player_cards.get(p["id"]) if p else None, time.time()),
     }
+
+def lyrics_track(cfg, card, now):
+    """The song on the screen, for its lyrics: who, what, and where in the song we are right now.
+
+    position is None when it isn't known (a radio station naming the song, before it is recognised);
+    the page then scrolls the lyrics slowly instead of following them line by line.
+    """
+    if not cfg.get("lyrics_enabled", True):
+        return None
+    try:
+        shift = float(cfg.get("lyrics_offset_seconds") or 0)
+    except (TypeError, ValueError):
+        shift = 0.0
+    pos = None
+    if card and card.get("online") and card.get("source") and card.get("show"):
+        if not card.get("song_known") or not card.get("title"):
+            return None
+        if card["source"] == "radio":
+            if card.get("recognised") and card.get("heard_offset") is not None and card.get("heard_at"):
+                pos = card["heard_offset"] + (now - card["heard_at"])
+        elif card.get("position") is not None:
+            pos = card["position"] + ((now - card.get("polled_at", now)) if card.get("playing") else 0)
+        song = {"artist": card.get("artist", ""), "title": card["title"], "album": card.get("album", ""),
+                "duration": card.get("duration") or card.get("song_duration"), "playing": bool(card.get("playing"))}
+    else:
+        a = latest_ambient_state
+        if not a.get("identified"):
+            return None
+        if a.get("offset") is not None and a.get("heard_at"):
+            pos = a["offset"] + (now - a["heard_at"])
+        song = {"artist": a.get("artist", ""), "title": a.get("title", ""), "album": a.get("album", ""),
+                "duration": a.get("duration"), "playing": True}
+    song["key"] = f"{song['artist']}\n{song['title']}".lower()
+    song["position"] = round(pos + shift, 2) if pos is not None else None
+    return song
+
+@app.get("/api/lyrics")
+async def get_lyrics(artist: str = "", title: str = "", album: str = "", duration: float | None = None):
+    """The lyrics of a song (LRCLIB, cached on the Pi): synced lines with times, or the plain text."""
+    return await asyncio.get_running_loop().run_in_executor(None, lyrics.lookup, artist, title, album, duration)
 
 @app.get("/api/screen")
 async def get_screen():
