@@ -31,11 +31,26 @@ _db_path: str | None = None
 _lock = threading.Lock()
 
 
+# Raised whenever the matching gets better: songs not found with an older version are looked up again.
+MATCHER_VERSION = 3
+
+
 def init(path: str) -> None:
     global _db_path
     _db_path = path
     with _connect() as db:
         db.execute("CREATE TABLE IF NOT EXISTS lyrics (key TEXT PRIMARY KEY, answer TEXT, found INTEGER, fetched_at REAL)")
+        if db.execute("PRAGMA user_version").fetchone()[0] < MATCHER_VERSION:
+            db.execute("DELETE FROM lyrics WHERE found = 0")
+            db.execute(f"PRAGMA user_version = {MATCHER_VERSION}")
+
+
+def title_variants(title: str) -> list[str]:
+    """How to search for a title: as it is, without '(Remastered)' and the like, and without punctuation
+    (LRCLIB's search matches whole words, so 'CHANEL$' wouldn't find 'CHANEL')."""
+    plain = re.sub(r"\s*[\(\[].*?[\)\]]", "", title).strip()
+    bare = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", plain)).strip()
+    return [t for t in dict.fromkeys([title, plain, bare]) if t]
 
 
 def _connect() -> sqlite3.Connection:
@@ -162,7 +177,7 @@ def fetch(artist: str, title: str, album: str = "", duration: float | None = Non
             r.raise_for_status()
     # 2. Search by title and artist, and pick the best fit.
     best, best_score = None, None
-    for t in dict.fromkeys([title, re.sub(r"\s*[\(\[].*?[\)\]]", "", title).strip()]):   # also without "(Remastered)"
+    for t in title_variants(title):
         r = session.get(f"{API}/search", headers=HEADERS, timeout=8,
                         params={"track_name": t, "artist_name": main_artist(artist)})
         if r.status_code == 404:
@@ -174,16 +189,20 @@ def fetch(artist: str, title: str, album: str = "", duration: float | None = Non
                 best, best_score = rec, s
         if best is not None:
             break
-    if best is None and duration:
-        # 3. The title is written differently on LRCLIB (Japanese script vs romaji or English...): all songs by
-        #    this artist (and on this album), and the one with the same length.
-        for q in dict.fromkeys(filter(None, [f"{main_artist(artist)} {album}".strip(), main_artist(artist)])):
+    if best is None:
+        # 3. A free search: artist and title, artist and album, the artist alone. Take a result with the same
+        #    title, or (for a title written differently: Japanese script vs romaji or English) the same length.
+        a = main_artist(artist)
+        queries = [f"{a} {title_variants(title)[-1]}", f"{a} {album}".strip() if album else "", a]
+        for q in dict.fromkeys(filter(None, queries)):
             r = session.get(f"{API}/search", headers=HEADERS, timeout=8, params={"q": q})
             if r.status_code == 404:
                 continue
             r.raise_for_status()
             for rec in r.json() or []:
-                s = _by_length(rec, artist, album, duration)
+                s = _score(rec, artist, title, duration)
+                if s is None:
+                    s = _by_length(rec, artist, album, duration)
                 if s is not None and (best_score is None or s > best_score):
                     best, best_score = rec, s
             if best is not None:
