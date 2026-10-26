@@ -43,6 +43,7 @@ try:
     import lyrics
     import spins
     import touchwake
+    import updates
 except Exception:
     # Imports run with stderr silenced (to hide ALSA noise); show why startup failed instead of exiting silently.
     os.dup2(old_stderr, 2)
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(background_radio_listener()),
         asyncio.create_task(background_screen_manager()),
         asyncio.create_task(background_spins_sender()),
+        asyncio.create_task(background_auto_update()),
     ]
     cfg = load_config()
     set_screen_rotation(cfg.get("screen_rotation", "normal"))
@@ -88,6 +90,8 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 CONFIG_EXAMPLE_FILE = os.path.join(BASE_DIR, "config.example.json")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 HISTORY_DB = os.path.join(DATA_DIR, "history.db")
+# Versions and updates: the separate updater (deploy/update.sh) does the work; see updates.py
+UPDATES = updates.Updates("jplayingnow", os.path.dirname(BASE_DIR), DATA_DIR)
 
 os.makedirs(STATIC_DIR, exist_ok=True)
 templates = Jinja2Templates(directory=STATIC_DIR)
@@ -112,6 +116,8 @@ DEFAULT_CONFIG = {
     "radio_listen": True,             # recognise songs on radio stations that don't name them (listens to the stream)
     "lyrics_enabled": True,           # show the song's lyrics (LRCLIB), in time with the music when possible
     "lyrics_offset_seconds": 0,       # move the lyrics earlier (-) or later (+) if they run ahead or behind
+    "update_channel": "releases",     # releases (tagged versions) | main (the newest commit, for development)
+    "update_auto": "off",             # off | night (install updates between 03:00 and 05:00 when nothing plays)
     "players": []                     # JPlay players: {id, name, host, port, enabled}
 }
 
@@ -953,6 +959,8 @@ async def save_settings(request: Request):
     cfg["screen_wake_on_song"] = form.get("screen_wake_on_song") == "on"
     cfg["radio_listen"] = form.get("radio_listen") == "on"
     cfg["lyrics_enabled"] = form.get("lyrics_enabled") == "on"
+    cfg["update_channel"] = "main" if form.get("update_channel") == "main" else "releases"
+    cfg["update_auto"] = "night" if form.get("update_auto") == "night" else "off"
     try:
         cfg["lyrics_offset_seconds"] = max(-30.0, min(30.0, float(form.get("lyrics_offset_seconds") or 0)))
     except ValueError:
@@ -1132,6 +1140,7 @@ async def get_dashboard():
         "ambient": latest_ambient_state,
         "screen": {"on": screen["on"], "changed": screen["changed"]},
         "lyrics": lyrics_track(cfg, player_cards.get(p["id"]) if p else None, time.time()),
+        "update_available": update_available[0],
     }
 
 def lyrics_track(cfg, card, now):
@@ -1168,6 +1177,68 @@ def lyrics_track(cfg, card, now):
     song["key"] = f"{song['artist']}\n{song['title']}".lower()
     song["position"] = round(pos + shift, 2) if pos is not None else None
     return song
+
+# ---------------------------------------------------------------- versions and updates
+update_available = [False]     # for the dot on the display's Settings button
+
+def update_status():
+    st = UPDATES.status(load_config().get("update_channel", "releases"))
+    update_available[0] = bool(st["available"])
+    return st
+
+@app.get("/api/version")
+async def api_version():
+    """This app's version (also what the updater asks to see that the app started)."""
+    return await asyncio.get_running_loop().run_in_executor(None, UPDATES.version)
+
+@app.get("/api/update")
+async def api_update():
+    """Version, the newest release, its notes, and how an update is going."""
+    return await asyncio.get_running_loop().run_in_executor(None, update_status)
+
+@app.post("/api/update/check")
+async def api_update_check():
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, UPDATES.check)
+    except updates.UpdateError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    return {"ok": True}
+
+@app.post("/api/update/install")
+async def api_update_install(request: Request):
+    """Update to the newest version (or {"target": "v1.6.0"}). The updater restarts this app when done."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    st = await asyncio.get_running_loop().run_in_executor(None, update_status)
+    target = body.get("target") or st["target"]
+    if not target:
+        return JSONResponse({"error": "Already up to date"}, status_code=409)
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, UPDATES.install, target)
+    except updates.UpdateError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    return {"ok": True, "target": target}
+
+async def background_auto_update():
+    """Every minute: refresh the 'update available' dot, and install at night when that is switched on."""
+    loop = asyncio.get_running_loop()
+    await asyncio.sleep(5)
+    while True:
+        try:
+            cfg = load_config()
+            await loop.run_in_executor(None, update_status)
+            # Busy: a song was heard or this display's player played in the last 10 minutes
+            busy = time.time() - max(pending_play["heard"] or 0, last_player_activity[0]) < 600
+            target = await loop.run_in_executor(None, UPDATES.auto_target, cfg.get("update_auto", "off"),
+                                                cfg.get("update_channel", "releases"), busy)
+            if target:
+                print(f"[update] installing {target} automatically")
+                await loop.run_in_executor(None, UPDATES.install, target)
+        except Exception as e:
+            print(f"[update] {type(e).__name__}: {e}")
+        await asyncio.sleep(60)
 
 @app.get("/api/lyrics")
 async def get_lyrics(artist: str = "", title: str = "", album: str = "", duration: float | None = None):

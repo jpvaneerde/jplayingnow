@@ -168,15 +168,42 @@ sudo reboot
 After about a minute the screen shows JPlaying Now by itself, and http://192.168.1.225:5000 works from the PC.
 Play the radio on the room's JPlay player: within a minute, records.jplay.cloud/spins shows it on that room's card.
 
-## Updating a unit
+## Updates
 
-The first update after moOde: the moOde players in the settings become JPlay players on the same addresses, port
-8080. Check them under **Settings → JPlay Players**.
+**Settings → Version & updates** shows the version (from the git tags: `1.6.0`, or `1.6.0+3` for 3 commits after
+it), whether a newer release is on GitHub with its notes, and **Update to …**. A green dot on the display's Settings
+button means an update is waiting. Options: updates from **Releases** or the **newest commit** (for development),
+and **install automatically at night** (03:00–05:00, only when nothing was heard or played for 10 minutes). Home
+Assistant shows the same under **Settings → Updates** (the JPlay integration), with an Install button.
+
+**One-time setup on each unit** (after the `git pull` that brings the updater):
 
 ```sh
 ssh jp@192.168.1.225
-cd ~/jplayingnow && git pull && .venv/bin/pip install -r requirements.txt && sudo systemctl restart jplayingnow
+cd ~/jplayingnow && git pull && sudo bash deploy/install-updater.sh
 ```
+
+That installs the separate updater ([deploy/update.sh](deploy/update.sh)) as `jplayingnow-update.service`, a check
+every 6 hours (`jplayingnow-update-check.timer`) and a sudoers rule that lets JPlaying Now start exactly these two
+services. JPlaying Now never updates itself: it asks the updater, which, as root:
+
+1. fetches from GitHub (git as `jp`, with the access `git pull` already has),
+2. moves `main` forward to the release (fast-forward only: hand-made changes are never overwritten; it refuses
+   instead),
+3. installs the Python packages, only when `requirements.txt` changed,
+4. restarts JPlaying Now and waits until it answers,
+5. and when it doesn't, goes back to the previous version (packages too) and restarts that.
+
+Settings shows each step and, if it failed, why. Settings (`config.json`) and history (`data/`) are never touched.
+Changes to the files in `deploy/` (systemd units) are noted but not installed; re-run the setup steps for those.
+
+**Releasing a version** (on the PC, in the repo, after committing): `.\tools\release.ps1`. It asks for the version
+(suggesting the next one) and the release notes (the commit messages since the last release if you type none),
+tags the commit `vX.Y.Z` and pushes. The units see it within 6 hours, or at once with **Check now**. If Windows
+refuses to run scripts: `powershell -ExecutionPolicy Bypass -File tools\release.ps1`.
+
+**By hand**, as before: `cd ~/jplayingnow && git pull && .venv/bin/pip install -r requirements.txt && sudo systemctl
+restart jplayingnow`.
 
 ## Troubleshooting
 
@@ -189,6 +216,7 @@ cd ~/jplayingnow && git pull && .venv/bin/pip install -r requirements.txt && sud
 | No songs recognised | Settings → Ambient Listening shows which microphone is used; pick the USB one and check the volume near the speakers. |
 | A player shows "Offline" | Check its address and port (8080) under Settings → JPlay Players, and that `http://<player>:8080` opens. |
 | Radio songs aren't recognised | `http://<unit>:5000/api/players-status` shows each player's status and the radio listener's last result. It needs `ffmpeg` (step 3). |
+| An update failed or hangs | Settings → Version & updates shows the steps and the error. More: `journalctl -u jplayingnow-update -n 50` and `journalctl -u jplayingnow-update-check -n 20`. "Updates not set up": run the one-time setup under Updates. |
 | Nothing arrives in JPlay Spins | The JPlay Spins card shows events waiting and the last error; so does `http://<unit>:5000/api/spins-status`. A "token" error means the listener was removed or the token was mistyped. |
 
 ## JPlay Spins

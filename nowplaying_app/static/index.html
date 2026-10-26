@@ -38,6 +38,8 @@
         .pill { display: inline-flex; align-items: center; gap: 0.4em; color: var(--muted); text-decoration: none; font: inherit; font-weight: 700;
                 font-size: 0.85em; padding: 0.4em 0.85em; border-radius: 999px; border: 1px solid var(--line); background: var(--card); cursor: pointer; white-space: nowrap; }
         .pill svg { width: 1.1em; height: 1.1em; }
+        /* An update is waiting: a small dot on Settings */
+        .pill.has-update::after { content: ""; width: 0.5em; height: 0.5em; border-radius: 50%; background: #10b981; box-shadow: 0 0 0 2px var(--bg); }
         .pill.player { color: var(--text); max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
         .pill.player .dot { width: 0.55em; height: 0.55em; border-radius: 50%; background: var(--src, #6b7280); flex: none; }
         .menu { position: absolute; top: 2.6em; right: 0; min-width: 14em; background: var(--bg); border: 1px solid var(--line); border-radius: 14px;
@@ -149,7 +151,7 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             <a href="/history" class="pill">History</a>
-            <a href="/settings" class="pill">Settings</a>
+            <a href="/settings" class="pill" id="settings-pill">Settings</a>
             <div class="menu" id="menu" role="menu"></div>
         </header>
         <div id="panel" class="src-none"></div>
@@ -376,6 +378,7 @@
                     lastHtml = html;
                     lyricsTick();
                 }
+                document.getElementById('settings-pill').classList.toggle('has-update', !!data.update_available);
                 if (data.screen) screenOff = !data.screen.on && Date.now() - wokeAt > 4000;
                 clock = active && p.duration ? { pos: p.position || 0, dur: p.duration, at: performance.now(), running: p.playing } : { dur: 0 };
                 tick();

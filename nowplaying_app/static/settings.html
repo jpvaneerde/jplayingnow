@@ -27,6 +27,16 @@
         a { color: #9ca3af; text-decoration: none; display: inline-block; margin-bottom: 15px; }
         .checkbox-label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
         .checkbox-label input { width: 18px; height: 18px; }
+        .upd-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+        .upd-version { font-size: 1.4rem; font-weight: 800; }
+        .upd-badge { font-size: 0.8rem; font-weight: 700; padding: 3px 10px; border-radius: 999px; background: #374151; color: #d1d5db; }
+        .upd-badge.new { background: #065f46; color: #6ee7b7; }
+        .upd-badge.bad { background: #7f1d1d; color: #fca5a5; }
+        .upd-notes { white-space: pre-wrap; font-size: 0.85rem; color: #d1d5db; background: #111827; border-radius: 8px; padding: 10px; margin-top: 10px; max-height: 220px; overflow: auto; }
+        .upd-log { font-family: monospace; font-size: 0.72rem; color: #9ca3af; margin-top: 8px; white-space: pre-wrap; }
+        .upd-buttons { display: flex; gap: 10px; margin-top: 12px; }
+        .upd-buttons .btn { width: auto; }
+        .muted { color: #9ca3af; font-size: 0.8rem; }
     </style>
 </head>
 <body>
@@ -38,6 +48,31 @@
     </div>
     {% endif %}
     <form action="/settings/save" method="post">
+        <div class="card" id="updates">
+            <h3 style="margin-top: 0;">Version &amp; updates</h3>
+            <div class="upd-line">
+                <span class="upd-version" id="upd-version">…</span>
+                <span class="upd-badge" id="upd-badge">checking…</span>
+            </div>
+            <div class="muted" id="upd-summary"></div>
+            <div class="upd-notes" id="upd-notes" hidden></div>
+            <div class="upd-buttons">
+                <button type="button" class="btn" id="upd-install" hidden>Update</button>
+                <button type="button" class="btn btn-add" id="upd-check" style="margin-top: 0;">Check now</button>
+            </div>
+            <div class="upd-log" id="upd-log" hidden></div>
+            <label for="update_channel" style="margin-top: 16px;">Updates from</label>
+            <select id="update_channel" name="update_channel">
+                <option value="releases" {% if config.update_channel != 'main' %}selected{% endif %}>Releases (tagged versions)</option>
+                <option value="main" {% if config.update_channel == 'main' %}selected{% endif %}>Newest commit on GitHub (for development)</option>
+            </select>
+            <label class="checkbox-label" style="margin-top: 12px; font-weight: normal;">
+                <input type="checkbox" name="update_auto" value="night" {% if config.update_auto == 'night' %}checked{% endif %}>
+                Install updates automatically at night (03:00–05:00, when nothing plays)
+            </label>
+            <p class="muted" style="margin: 8px 0 0;">An update restarts JPlaying Now (a few seconds). If it doesn't start afterwards, the
+                previous version comes back by itself.</p>
+        </div>
         <div class="card">
             <h3>System & Screen Options</h3>
             <label class="checkbox-label">
@@ -207,6 +242,79 @@
     {% endif %}
 
     <script>
+        /* ---------- version & updates ---------- */
+        (() => {
+            const $ = id => document.getElementById(id);
+            const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+            const ago = t => {
+                if (!t) return 'never';
+                const m = Math.floor((Date.now() / 1000 - t) / 60);
+                return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+            };
+            let st = null, timer = null, restarting = false, fastUntil = 0;   // fast: just after pressing a button
+            async function load() {
+                try {
+                    st = await (await fetch('/api/update', { cache: 'no-store' })).json();
+                    restarting = false;
+                } catch {
+                    restarting = true;                     // the app is restarting during an update
+                }
+                render();
+                clearTimeout(timer);
+                timer = setTimeout(load, restarting || st?.in_progress || Date.now() < fastUntil ? 2000 : 30000);
+            }
+            function render() {
+                if (!st) return;
+                $('upd-version').textContent = `Version ${st.version}`;
+                const badge = $('upd-badge'), install = $('upd-install');
+                badge.className = 'upd-badge';
+                let summary = '';
+                if (restarting) {
+                    badge.textContent = 'restarting…';
+                } else if (!st.supported) {
+                    badge.textContent = 'updates not set up';
+                    summary = 'Run once on the Pi: cd ~/jplayingnow && sudo bash deploy/install-updater.sh';
+                } else if (st.state === 'updating') {
+                    badge.textContent = 'updating…';
+                    summary = st.message;
+                } else if (st.state === 'checking') {
+                    badge.textContent = 'checking…';
+                } else if (st.state === 'failed' || st.state === 'rolled_back') {
+                    badge.textContent = st.state === 'rolled_back' ? 'update undone' : 'update failed';
+                    badge.classList.add('bad');
+                    summary = st.message;
+                } else if (st.available) {
+                    badge.textContent = `${st.latest} available`;
+                    badge.classList.add('new');
+                } else {
+                    badge.textContent = 'up to date';
+                    if (st.state === 'done' && st.finished_at && Date.now() / 1000 - st.finished_at < 600) summary = st.message;
+                }
+                if (st.supported && !summary) summary = `Checked ${ago(st.checked_at)}`;
+                $('upd-summary').textContent = summary;
+                const notes = $('upd-notes');
+                notes.hidden = !(st.available && st.notes);
+                notes.textContent = (st.notes || '').replace(/^## /gm, 'Version ');
+                install.hidden = !(st.supported && st.available && !st.in_progress && !restarting);
+                install.textContent = `Update to ${st.latest}`;
+                $('upd-check').disabled = !st.supported || st.in_progress || restarting;
+                const log = $('upd-log');
+                log.hidden = !(st.in_progress || st.state === 'failed' || st.state === 'rolled_back') || !st.log?.length;
+                log.textContent = (st.log || []).join('\n');
+            }
+            async function post(path, body) {
+                const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+                if (!r.ok) alert((await r.json().catch(() => ({}))).error || 'That didn\'t work');
+                fastUntil = Date.now() + 90000;
+                load();
+            }
+            $('upd-check').addEventListener('click', () => post('/api/update/check'));
+            $('upd-install').addEventListener('click', () => {
+                if (confirm(`Update JPlaying Now to ${st.latest}? It restarts for a few seconds.`)) post('/api/update/install', { target: st.target });
+            });
+            load();
+        })();
+
         function addPlayerRow() {
             const div = document.createElement('div');
             div.className = 'row';
